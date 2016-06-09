@@ -13,11 +13,11 @@
 
 typedef enum {
     RAFT_STATE_NONE,
-    RAFT_STATE_FOLLOWER,
-    RAFT_STATE_CANDIDATE,
-    RAFT_STATE_LEADER
+    RAFT_STATE_FOLLOWER, //跟随者
+    RAFT_STATE_CANDIDATE, //候选人
+    RAFT_STATE_LEADER  //领导
 } raft_state_e;
-
+//日志内容结构体
 typedef struct
 {
     void *buf;
@@ -26,13 +26,14 @@ typedef struct
 } raft_entry_data_t;
 
 /** Entry that is stored in the server's entry log. */
+//日志条目结构体
 typedef struct
 {
     /** the entry's term at the point it was created */
-    unsigned int term;
+    unsigned int term;//任期号
 
     /** the entry's unique ID */
-    unsigned int id;
+    unsigned int id;//日志唯一id
 
     raft_entry_data_t data;
 } raft_entry_t;
@@ -59,19 +60,20 @@ typedef struct
 /** Vote request message.
  * Sent to nodes when a server wants to become leader.
  * This message could force a leader/candidate to become a follower. */
+//请求投票消息结构体
 typedef struct
 {
     /** currentTerm, to force other leader/candidate to step down */
-    int term;
+    int term;//任期号
 
     /** candidate requesting vote */
-    int candidate_id;
+    int candidate_id; //候选者id
 
     /** index of candidate's last log entry */
-    int last_log_idx;
+    int last_log_idx;//最后一个日志id
 
     /** term of candidate's last log entry */
-    int last_log_term;
+    int last_log_term;//最后一个日志任期号
 } msg_requestvote_t;
 
 /** Vote request response message.
@@ -135,8 +137,8 @@ typedef struct
     int first_idx;
 } msg_appendentries_response_t;
 
-typedef void* raft_server_t;
-typedef void* raft_node_t;
+typedef void* raft_server_t; //对外提供的raft server对象
+typedef void* raft_node_t; //对外提供的raft node 对象
 
 /** Callback for sending request vote messages.
  * @param[in] raft The Raft server making this callback
@@ -240,6 +242,7 @@ typedef int (
     int entry_idx
     );
 
+//raft server 回调函数
 typedef struct
 {
     /** Callback for sending request vote messages */
@@ -295,10 +298,19 @@ typedef struct
  * Election timeout defaults to 1000 milliseconds
  *
  * @return newly initialised Raft server */
+/**
+ * 初始化raft server
+ * 然后一个已经被初始化好的raft server
+ * 默认情况下 请求超时时间为200毫秒，选举超时时间位1000毫秒
+ * @return newly 一个初始化好的raft server
+ */
 raft_server_t* raft_new();
 
 /** De-initialise Raft server.
  * Frees all memory */
+/**
+ * 释放raft server 对象
+ */
 void raft_free(raft_server_t* me);
 
 /** Set callbacks and user data.

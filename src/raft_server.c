@@ -37,50 +37,67 @@ static void __log(raft_server_t *me_, const char *fmt, ...)
         me->cb.log(me_, me->udata, buf);
 }
 
+/**
+ * 初始化 raft server对象
+ * 默认情况下 请求超时时间为200毫秒，选举超时时间位1000毫秒
+ */
 raft_server_t* raft_new()
 {
+    //申请内存
     raft_server_private_t* me =
         (raft_server_private_t*)calloc(1, sizeof(raft_server_private_t));
     if (!me)
         return NULL;
-    me->current_term = 0;
-    me->voted_for = -1;
-    me->timeout_elapsed = 0;
-    me->request_timeout = 200;
-    me->election_timeout = 1000;
-    me->log = log_new();
-    raft_set_state((raft_server_t*)me, RAFT_STATE_FOLLOWER);
-    me->current_leader = -1;
-    return (raft_server_t*)me;
+    me->current_term = 0; //当前任期号
+    me->voted_for = -1;   //当前获得选票的候选人id
+    me->timeout_elapsed = 0; //超时时间，从上一次获得心跳包到现在的时间
+    me->request_timeout = 200; //请求超时时间200毫秒
+    me->election_timeout = 1000; //选举超时时间1秒
+    me->log = log_new(); //log存取对象
+    raft_set_state((raft_server_t*)me, RAFT_STATE_FOLLOWER);//设置当前对象位跟随者
+    me->current_leader = -1;//当前领导这id为-1
+    return (raft_server_t*)me; //返回对象
 }
 
+/**
+ * 设置raft server 的回调函数
+ */
 void raft_set_callbacks(raft_server_t* me_, raft_cbs_t* funcs, void* udata)
 {
-    raft_server_private_t* me = (raft_server_private_t*)me_;
+    raft_server_private_t* me = (raft_server_private_t*)me_;//强转对象类型
 
-    memcpy(&me->cb, funcs, sizeof(raft_cbs_t));
-    me->udata = udata;
-    log_set_callbacks(me->log, &me->cb, me_);
+    memcpy(&me->cb, funcs, sizeof(raft_cbs_t));//拷贝回调函数的内存
+    me->udata = udata;//server对象所需要使用的外部数据或者对象
+    log_set_callbacks(me->log, &me->cb, me_);//设置log callbacks
 }
 
+/**
+ * 释放raft server 对象
+ */
 void raft_free(raft_server_t* me_)
 {
-    raft_server_private_t* me = (raft_server_private_t*)me_;
+    raft_server_private_t* me = (raft_server_private_t*)me_;//强转对象类型
 
-    log_free(me->log);
-    free(me_);
+    log_free(me->log);//释放日志对象申请的内存
+    free(me_);//释放raft server申请的内存
 }
 
+/**
+ * 选举开始
+ */
 void raft_election_start(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
+    //记录开始选举的日志
     __log(me_, "election starting: %d %d, term: %d",
           me->election_timeout, me->timeout_elapsed, me->current_term);
-
+    //改变自己身份，成为候选者，进行候选者应该做的工作
     raft_become_candidate(me_);
 }
-
+/**
+ * 成为领导
+ */
 void raft_become_leader(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -102,6 +119,9 @@ void raft_become_leader(raft_server_t* me_)
     }
 }
 
+/**
+ * 成为候选者，开始选举
+ */
 void raft_become_candidate(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -109,21 +129,28 @@ void raft_become_candidate(raft_server_t* me_)
 
     __log(me_, "becoming candidate");
 
-    memset(me->votes_for_me, 0, sizeof(int) * me->num_nodes);
-    me->current_term += 1;
-    raft_vote(me_, me->nodeid);
-    me->current_leader = -1;
-    raft_set_state(me_, RAFT_STATE_CANDIDATE);
+    memset(me->votes_for_me, 0, sizeof(int) * me->num_nodes);//设置node number 位置位0
+    me->current_term += 1; //当前任期+1
+    raft_vote(me_, me->nodeid);//跳票给自己
+    me->current_leader = -1;//当前leader = -1
+    raft_set_state(me_, RAFT_STATE_CANDIDATE);//设置自己当前状态位候选者
 
     /* we need a random factor here to prevent simultaneous candidates */
     /* TODO: this should probably be lower */
+    /*
+     * 选举超时时间 防止多个候选者瓜分选票,
+     * 这样就没办法选出leader了所以需要把每个候选者，选举的超时时间随机设置
+     */
     me->timeout_elapsed = rand() % me->election_timeout;
 
-    for (i = 0; i < me->num_nodes; i++)
+    for (i = 0; i < me->num_nodes; i++)//对除了自己以外的所有节点请求投票
         if (me->nodeid != i)
             raft_send_requestvote(me_, i);
 }
 
+/**
+ * 成为追随者
+ */
 void raft_become_follower(raft_server_t* me_)
 {
     __log(me_, "becoming follower");
@@ -156,6 +183,9 @@ int raft_periodic(raft_server_t* me_, int msec_since_last_period)
     return 0;
 }
 
+/**
+ * 获取指定索引的日志条目
+ */
 raft_entry_t* raft_get_entry_from_idx(raft_server_t* me_, int etyidx)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -522,36 +552,47 @@ int raft_recv_entry(raft_server_t* me_, int node, msg_entry_t* e,
     return 0;
 }
 
+/**
+ * 请求投票
+ */
 int raft_send_requestvote(raft_server_t* me_, int node)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
-    msg_requestvote_t rv;
+    msg_requestvote_t rv;//请求投票消息
 
-    __log(me_, "sending requestvote to: %d", node);
+    __log(me_, "sending requestvote to: %d", node);//记录发起了投票
 
-    rv.term = me->current_term;
-    rv.last_log_idx = raft_get_current_idx(me_);
-    rv.last_log_term = raft_get_last_log_term(me_);
-    rv.candidate_id = raft_get_nodeid(me_);
-    if (me->cb.send_requestvote)
+    rv.term = me->current_term;//任期为raft server对象的当前任期
+    rv.last_log_idx = raft_get_current_idx(me_);//当前日志的idx
+    rv.last_log_term = raft_get_last_log_term(me_);//最后一个日志的任期号
+    rv.candidate_id = raft_get_nodeid(me_);//候选者nodeid
+
+    if (me->cb.send_requestvote)//如果存在请求投票回调函数，这执行请求投票回调函数
         me->cb.send_requestvote(me_, me->udata, node, &rv);
     return 0;
 }
 
+/**
+ * 添加日志到当前raft server的日志条目中
+ */
 int raft_append_entry(raft_server_t* me_, raft_entry_t* ety)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     return log_append_entry(me->log, ety);
 }
 
+/**
+ * 把日志应用到状态机
+ */
 int raft_apply_entry(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
     /* Don't apply after the commit_idx */
+    //最后应用到状态机的id 不能等于最后提交id
     if (me->last_applied_idx == me->commit_idx)
         return -1;
-
+    //获取最后applyid+1的日志
     raft_entry_t* e = raft_get_entry_from_idx(me_, me->last_applied_idx + 1);
     if (!e)
         return -1;
@@ -559,7 +600,7 @@ int raft_apply_entry(raft_server_t* me_)
     __log(me_, "applying log: %d, size: %d", me->last_applied_idx, e->data.len);
 
     me->last_applied_idx++;
-    if (me->cb.applylog)
+    if (me->cb.applylog)//如果存在apply回调函数，则回调
         me->cb.applylog(me_, me->udata, e->data.buf, e->data.len);
     return 0;
 }
@@ -682,7 +723,9 @@ int raft_get_nvotes_for_me(raft_server_t* me_)
 
     return votes;
 }
-
+/**
+ * 投票
+ */
 void raft_vote(raft_server_t* me_, const int node)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
