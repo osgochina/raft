@@ -24,6 +24,7 @@
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) < (b) ? (b) : (a))
 
+//记录运行时log
 static void __log(raft_server_t *me_, const char *fmt, ...)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -104,17 +105,17 @@ void raft_become_leader(raft_server_t* me_)
     int i;
 
     __log(me_, "becoming leader");
-
+    //成为领导人
     raft_set_state(me_, RAFT_STATE_LEADER);
-
+    //对除了自己的节点发送成为领导人的消息
     for (i = 0; i < me->num_nodes; i++)
     {
         if (me->nodeid != i)
         {
-            raft_node_t* node = raft_get_node(me_, i);
-            raft_node_set_next_idx(node, raft_get_current_idx(me_) + 1);
-            raft_node_set_match_idx(node, 0);
-            raft_send_appendentries(me_, i);
+            raft_node_t* node = raft_get_node(me_, i);//获取指定节点
+            raft_node_set_next_idx(node, raft_get_current_idx(me_) + 1);//设置下一次需要发送给该节点的日志索引值
+            raft_node_set_match_idx(node, 0);//设置已经复制给该节点的日志索引值 选举完清零
+            raft_send_appendentries(me_, i);//添加条目到该节点
         }
     }
 }
@@ -157,27 +158,31 @@ void raft_become_follower(raft_server_t* me_)
     raft_set_state(me_, RAFT_STATE_FOLLOWER);
 }
 
+/**
+ * raft 的循环周期
+ * msec_since_last_period 超时时间
+ */
 int raft_periodic(raft_server_t* me_, int msec_since_last_period)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
     me->timeout_elapsed += msec_since_last_period;
 
-    if (me->state == RAFT_STATE_LEADER)
+    if (me->state == RAFT_STATE_LEADER)//如果服务状态是领导
     {
-        if (me->request_timeout <= me->timeout_elapsed)
-            raft_send_appendentries_all(me_);
+        if (me->request_timeout <= me->timeout_elapsed)//如果已经到了心跳的时间
+            raft_send_appendentries_all(me_);//对所有节点发送心跳包
     }
-    else if (me->election_timeout <= me->timeout_elapsed)
+    else if (me->election_timeout <= me->timeout_elapsed)//如果选举超时时间小于心跳时间
     {
-        if (1 == me->num_nodes)
-            raft_become_leader(me_);
+        if (1 == me->num_nodes)//只有一个节点
+            raft_become_leader(me_);//则自己成为learder
         else
-            raft_election_start(me_);
+            raft_election_start(me_);//否则开始选举
     }
 
-    if (me->last_applied_idx < me->commit_idx)
-        if (-1 == raft_apply_entry(me_))
+    if (me->last_applied_idx < me->commit_idx)//当前状态机条目日志索引小于已提交日志条目
+        if (-1 == raft_apply_entry(me_))//应用日志
             return -1;
 
     return 0;
@@ -192,6 +197,9 @@ raft_entry_t* raft_get_entry_from_idx(raft_server_t* me_, int etyidx)
     return log_get_from_idx(me->log, etyidx);
 }
 
+/**
+ * 提交日志条目响应
+ */
 int raft_recv_appendentries_response(raft_server_t* me_,
                                      int node_idx,
                                      msg_appendentries_response_t* r)
@@ -203,72 +211,84 @@ int raft_recv_appendentries_response(raft_server_t* me_,
           node_idx, r->success == 1 ? "success" : "fail", r->current_idx,
           r->first_idx);
 
-    if (!raft_is_leader(me_))
+    if (!raft_is_leader(me_))//如果已经不是领导了。则返回失败
         return -1;
 
-    raft_node_t* node = raft_get_node(me_, node_idx);
+    raft_node_t* node = raft_get_node(me_, node_idx);//获得此日志节点
 
     /* If response contains term T > currentTerm: set currentTerm = T
        and convert to follower (§5.3) */
-    if (me->current_term < r->term)
+    if (me->current_term < r->term)//如果当前服务的任期小于响应节点的任期号
     {
-        raft_set_current_term(me_, r->term);
-        raft_become_follower(me_);
+        raft_set_current_term(me_, r->term);//更新当前服务任期号
+        raft_become_follower(me_);//当前服务成为跟随者
         return 0;
     }
-    else if (me->current_term != r->term)
+    else if (me->current_term != r->term)//如果当前任期不等于响应任期，则忽略
         return 0;
 
-    if (0 == r->success)
+    if (0 == r->success)//响应失败
     {
         /* If AppendEntries fails because of log inconsistency:
            decrement nextIndex and retry (§5.3) */
-        assert(0 <= raft_node_get_next_idx(node));
+        //assert(0 <= raft_node_get_next_idx(node));
 
-        int next_idx = raft_node_get_next_idx(node);
-        assert(0 <= next_idx);
-        if (r->current_idx < next_idx - 1)
+        int next_idx = raft_node_get_next_idx(node);//获取这个节点下一个需要提交的日志索引
+        assert(0 <= next_idx);//索引不能<=0
+        if (r->current_idx < next_idx - 1)//该节点的发送日志索引值减一还比响应值大
+        {
+            //设置该节点下个需要发送的日志索引值等于响应索引值+1
             raft_node_set_next_idx(node, min(r->current_idx + 1, raft_get_current_idx(me_)));
+        }
         else
+        {
+            //设置需发送的日志索引值
             raft_node_set_next_idx(node, next_idx - 1);
+        }
 
         /* retry */
+        //重新尝试发送该日志
         raft_send_appendentries(me_, node_idx);
         return 0;
     }
 
+    //响应的日志索引值<= 当前索引值 则出错
     assert(r->current_idx <= raft_get_current_idx(me_));
 
     /* response to a repeat transmission -- ignore */
+    //响应索引值等于该节点所需要发送的最高值
     if (raft_node_get_match_idx(node) == r->current_idx)
         return 0;
-
+    //获得该节点已发送的最高日志索引值
     raft_node_set_next_idx(node, r->current_idx + 1);
+    //设置该节点所发送的日志最高索引值
     raft_node_set_match_idx(node, r->current_idx);
 
+    //更新已提交idx
     /* Update commit idx */
-    int votes = 1; /* include me */
-    int point = r->current_idx;
+    int votes = 1; /* include me */ //已提交此日志的选票
+    int point = r->current_idx; //日志的当前索引值
     int i;
     for (i = 0; i < me->num_nodes; i++)
     {
         if (me->nodeid == i)
             continue;
 
-        int match_idx = raft_node_get_match_idx(me->nodes[i]);
+        int match_idx = raft_node_get_match_idx(me->nodes[i]);//获取每个节点的已发送的最高日志索引值
 
         if (0 < match_idx)
         {
             raft_entry_t* ety = raft_get_entry_from_idx(me_, match_idx);
-            if (ety->term == me->current_term && point <= match_idx)
+            if (ety->term == me->current_term && point <= match_idx)//该节点日志已提交，选票+1
                 votes++;
         }
     }
-
+    //保证大于一半的节点提交保持的此日志，这learder提交此日志进状态机
     if (me->num_nodes / 2 < votes && raft_get_commit_idx(me_) < point)
         raft_set_commit_idx(me_, point);
 
     /* Aggressively send remaining entries */
+    //积极的发送剩余未提交的条目
     if (raft_get_entry_from_idx(me_, raft_node_get_next_idx(node)))
         raft_send_appendentries(me_, node_idx);
 
@@ -604,37 +624,38 @@ int raft_apply_entry(raft_server_t* me_)
         me->cb.applylog(me_, me->udata, e->data.buf, e->data.len);
     return 0;
 }
-
+//添加日志条目到指定节点
 void raft_send_appendentries(raft_server_t* me_, int node_idx)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    if (!(me->cb.send_appendentries))
+    if (!(me->cb.send_appendentries))//如果没有指定的回调函数，就失败
         return;
 
-    raft_node_t* node = raft_get_node(me_, node_idx);
+    raft_node_t* node = raft_get_node(me_, node_idx);//获取指定节点
 
-    msg_appendentries_t ae;
-    ae.term = me->current_term;
-    ae.leader_commit = raft_get_commit_idx(me_);
-    ae.prev_log_idx = 0;
-    ae.prev_log_term = 0;
-    ae.n_entries = 0;
-    ae.entries = NULL;
-
+    msg_appendentries_t ae;//发送日志消息结构体
+    ae.term = me->current_term; //任期号为当前任期号
+    ae.leader_commit = raft_get_commit_idx(me_);//领导人已经提交的日志的索引值
+    ae.prev_log_idx = 0;//新的日志条目紧随之前的索引值 0表示这是这个节点成为领导人后的第一个消息
+    ae.prev_log_term = 0;//这条消息的上个上的的任期号
+    ae.n_entries = 0; //日志条目数量
+    ae.entries = NULL;//空消息 心跳包
+    //获取此节点下次需要发送的日志条目索引值
     int next_idx = raft_node_get_next_idx(node);
 
     msg_entry_t mety;
 
-    raft_entry_t* ety = raft_get_entry_from_idx(me_, next_idx);
+    raft_entry_t* ety = raft_get_entry_from_idx(me_, next_idx);//获取需要发送的日志
     if (ety)
     {
-        mety.term = ety->term;
-        mety.id = ety->id;
-        mety.data.len = ety->data.len;
-        mety.data.buf = ety->data.buf;
-        ae.entries = &mety;
+        mety.term = ety->term;//任期号
+        mety.id = ety->id;//id
+        mety.data.len = ety->data.len;//数据长度
+        mety.data.buf = ety->data.buf;//数据
+        ae.entries = &mety;//消息地址给消息结构体
         // TODO: we want to send more than 1 at a time
+        //目前只支持单条发送，后期实现多条发送
         ae.n_entries = 1;
     }
 
@@ -642,9 +663,9 @@ void raft_send_appendentries(raft_server_t* me_, int node_idx)
     if (1 < next_idx)
     {
         raft_entry_t* prev_ety = raft_get_entry_from_idx(me_, next_idx - 1);
-        ae.prev_log_idx = next_idx - 1;
+        ae.prev_log_idx = next_idx - 1;//上条消息的idx
         if (prev_ety)
-            ae.prev_log_term = prev_ety->term;
+            ae.prev_log_term = prev_ety->term;//上条消息的任期号
     }
 
     __log(me_, "sending appendentries node: %d, %d %d %d %d",
@@ -652,11 +673,14 @@ void raft_send_appendentries(raft_server_t* me_, int node_idx)
           ae.term,
           ae.leader_commit,
           ae.prev_log_idx,
-          ae.prev_log_term);
+          ae.prev_log_term);//记录发送日志
 
     me->cb.send_appendentries(me_, me->udata, node_idx, &ae);
 }
 
+/**
+ * 对所有节点发送一条消息
+ */
 void raft_send_appendentries_all(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -665,9 +689,9 @@ void raft_send_appendentries_all(raft_server_t* me_)
     me->timeout_elapsed = 0;
     for (i = 0; i < me->num_nodes; i++)
         if (me->nodeid != i)
-            raft_send_appendentries(me_, i);
+            raft_send_appendentries(me_, i);//对指定节点发送一条消息
 }
-
+//初始化节点配置
 void raft_set_configuration(raft_server_t* me_,
                             raft_node_configuration_t* nodes, int my_idx)
 {
@@ -687,27 +711,35 @@ void raft_set_configuration(raft_server_t* me_,
     me->nodeid = my_idx;
 }
 
+/**
+ * 添加节点
+ */
 int raft_add_node(raft_server_t* me_, void* udata, int is_self)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
     /* TODO: does not yet support dynamic membership changes */
+    //目前不支持动态成员变化
     if (me->current_term != 0 && me->timeout_elapsed != 0 &&
         me->election_timeout != 0)
         return -1;
 
     me->num_nodes++;
+    //重新分配节点内存
     me->nodes =
         (raft_node_t*)realloc(me->nodes, sizeof(raft_node_t*) * me->num_nodes);
-    me->nodes[me->num_nodes - 1] = raft_node_new(udata);
+    me->nodes[me->num_nodes - 1] = raft_node_new(udata);//节点对象
     me->votes_for_me =
-        (int*)realloc(me->votes_for_me, me->num_nodes * sizeof(int));
-    me->votes_for_me[me->num_nodes - 1] = 0;
+        (int*)realloc(me->votes_for_me, me->num_nodes * sizeof(int));//得票详情内存分配
+    me->votes_for_me[me->num_nodes - 1] = 0;//默认无投票
     if (is_self)
-        me->nodeid = me->num_nodes - 1;
+        me->nodeid = me->num_nodes - 1;//nodeid等于node数量
     return 0;
 }
 
+/**
+ * 获取已获得的选票数量
+ */
 int raft_get_nvotes_for_me(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;

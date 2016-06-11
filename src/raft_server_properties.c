@@ -68,6 +68,9 @@ int raft_get_voted_for(raft_server_t* me_)
     return ((raft_server_private_t*)me_)->voted_for;
 }
 
+/**
+ * 设置raft server新的任期号
+ */
 void raft_set_current_term(raft_server_t* me_, const int term)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -84,7 +87,7 @@ int raft_get_current_term(raft_server_t* me_)
 {
     return ((raft_server_private_t*)me_)->current_term;
 }
-
+//获取当前日志索引值
 int raft_get_current_idx(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -128,14 +131,14 @@ int raft_get_state(raft_server_t* me_)
 {
     return ((raft_server_private_t*)me_)->state;
 }
-
+//获取指定节点
 raft_node_t* raft_get_node(raft_server_t *me_, int nodeid)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    if (nodeid < 0 || me->num_nodes <= nodeid)
+    if (nodeid < 0 || me->num_nodes <= nodeid)//要获取的node不能小于0也不能大于节点数
         return NULL;
-    return (raft_node_t*)me->nodes[nodeid];
+    return (raft_node_t*)me->nodes[nodeid];//返回要获取的节点对象
 }
 
 int raft_get_current_leader(raft_server_t* me_)

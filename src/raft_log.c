@@ -139,11 +139,17 @@ raft_entry_t* log_get_from_idx(log_t* me_, int idx)
     return &me->entries[i];
 }
 
+/**
+ * 日志总数
+ */
 int log_count(log_t* me_)
 {
     return ((log_private_t*)me_)->count;
 }
 
+/**
+ * 删除指定索引日志
+ */
 void log_delete(log_t* me_, int idx)
 {
     log_private_t* me = (log_private_t*)me_;
@@ -193,6 +199,9 @@ raft_entry_t *log_peektail(log_t * me_)
         return &me->entries[me->back - 1];
 }
 
+/**
+ * 清空日志
+ */
 void log_empty(log_t * me_)
 {
     log_private_t* me = (log_private_t*)me_;
@@ -211,7 +220,7 @@ void log_free(log_t * me_)
     free(me->entries);
     free(me);
 }
-
+//获取当前日志索引值
 int log_get_current_idx(log_t* me_)
 {
     log_private_t* me = (log_private_t*)me_;

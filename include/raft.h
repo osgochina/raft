@@ -41,100 +41,116 @@ typedef struct
 /** Message sent from client to server.
  * The client sends this message to a server with the intention of having it
  * applied to the FSM. */
+/**
+ * 客户端向服务端发送消息的结构体
+ */
 typedef raft_entry_t msg_entry_t;
 
 /** Entry message response.
  * Indicates to client if entry was committed or not. */
+/**
+ * 日志条目响应
+ */
 typedef struct
 {
     /** the entry's unique ID */
-    unsigned int id;
+    unsigned int id;//当前日志的唯一id
 
     /** the entry's term */
-    int term;
+    int term;//任期号
 
     /** the entry's index */
-    int idx;
+    int idx;//索引
 } msg_entry_response_t;
 
 /** Vote request message.
  * Sent to nodes when a server wants to become leader.
  * This message could force a leader/candidate to become a follower. */
-//请求投票消息结构体
+//请求投票 RPC
 typedef struct
 {
     /** currentTerm, to force other leader/candidate to step down */
-    int term;//任期号
+    int term;//候选人的任期号
 
     /** candidate requesting vote */
-    int candidate_id; //候选者id
+    int candidate_id; //请求选票的候选人的 Id
 
     /** index of candidate's last log entry */
-    int last_log_idx;//最后一个日志id
+    int last_log_idx;//候选人的最后日志条目的索引值
 
     /** term of candidate's last log entry */
-    int last_log_term;//最后一个日志任期号
+    int last_log_term;//候选人最后日志条目的任期号
 } msg_requestvote_t;
 
 /** Vote request response message.
  * Indicates if node has accepted the server's vote request. */
+/**
+ * 请求投票响应
+ */
 typedef struct
 {
     /** currentTerm, for candidate to update itself */
-    int term;
+    int term;//当前任期号，以便于候选人去更新自己的任期号
 
     /** true means candidate received vote */
-    int vote_granted;
+    int vote_granted;//候选人赢得了此张选票时为真
 } msg_requestvote_response_t;
 
 /** Appendentries message.
  * This message is used to tell nodes if it's safe to apply entries to the FSM.
  * Can be sent without any entries as a keep alive message.
  * This message could force a leader/candidate to become a follower. */
+/**
+ * 附加日志 RPC：
+ *
+ */
 typedef struct
 {
     /** currentTerm, to force other leader/candidate to step down */
-    int term;
+    int term;//此消息的任期号
 
     /** the index of the log just before the newest entry for the node who
      * receives this message */
-    int prev_log_idx;
+    int prev_log_idx;//新的日志条目紧随之前的索引值
 
     /** the term of the log just before the newest entry for the node who
      * receives this message */
-    int prev_log_term;
+    int prev_log_term;//这条消息的上个上的的任期号
 
     /** the index of the entry that has been appended to the majority of the
      * cluster. Entries up to this index will be applied to the FSM */
-    int leader_commit;
+    int leader_commit;//领导人已经提交的日志的索引值
 
     /** number of entries within this message */
-    int n_entries;
+    int n_entries;//这个消息的日志条目数
 
     /** array of entries within this message */
-    msg_entry_t* entries;
+    msg_entry_t* entries;//需要存储当然日志条目（表示心跳时为空；一次性发送多个是为了提高效率）
 } msg_appendentries_t;
 
 /** Appendentries response message.
  * Can be sent without any entries as a keep alive message.
  * This message could force a leader/candidate to become a follower. */
+/**
+ * 附加日志响应
+ */
 typedef struct
 {
     /** currentTerm, to force other leader/candidate to step down */
-    int term;
+    int term;//当前的任期号，用于领导人去更新自己
 
     /** true if follower contained entry matching prevLogidx and prevLogTerm */
-    int success;
+    int success;//跟随者包含了匹配上 prevLogIndex 和 prevLogTerm 的日志时为真
 
     /* Non-Raft fields follow: */
     /* Having the following fields allows us to do less book keeping in
      * regards to full fledged RPC */
 
     /** This is the highest log IDX we've received and appended to our log */
-    int current_idx;
+    int current_idx;//当前日志idx
 
     /** The first idx that we received within the appendentries message */
-    int first_idx;
+    int first_idx;//第一个日志的idx
 } msg_appendentries_response_t;
 
 typedef void* raft_server_t; //对外提供的raft server对象
