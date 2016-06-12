@@ -296,7 +296,9 @@ int raft_recv_appendentries_response(raft_server_t* me_,
 
     return 0;
 }
-
+/**
+ * 收到附加日志消息(跟随者)
+ */
 int raft_recv_appendentries(
     raft_server_t* me_,
     const int node,
@@ -306,9 +308,9 @@ int raft_recv_appendentries(
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    me->timeout_elapsed = 0;
+    me->timeout_elapsed = 0;//超时时间，从上一次获得心跳包到现在的时间 置0
 
-    if (0 < ae->n_entries)
+    if (0 < ae->n_entries)//消息中的日志数目大于0
         __log(me_, "recvd appendentries from: %d, %d %d %d %d #%d",
               node,
               ae->term,
@@ -317,19 +319,20 @@ int raft_recv_appendentries(
               ae->prev_log_term,
               ae->n_entries);
 
-    r->term = me->current_term;
+    r->term = me->current_term;//响应消息 任期号
 
+    //如果服务当前状态是候选者 且任期号跟消息中的任期号一致
     if (raft_is_candidate(me_) && me->current_term == ae->term)
     {
-        me->voted_for = -1;
-        raft_become_follower(me_);
+        me->voted_for = -1;//清空选票
+        raft_become_follower(me_);//成为追随者
     }
-    else if (me->current_term < ae->term)
+    else if (me->current_term < ae->term)//任期小于消息任期
     {
-        raft_set_current_term(me_, ae->term);
-        raft_become_follower(me_);
+        raft_set_current_term(me_, ae->term);//更新节点当前任期
+        raft_become_follower(me_);//成为追随者
     }
-    else if (ae->term < me->current_term)
+    else if (ae->term < me->current_term)//消息任期比当前任期小 返回失败状态
     {
         /* 1. Reply false if term < currentTerm (§5.1) */
         __log(me_, "AE term is less than current term");
@@ -338,10 +341,12 @@ int raft_recv_appendentries(
 
     /* Not the first appendentries we've received */
     /* NOTE: the log starts at 1 */
+    //我们收到的消息不是第一条消息
     if (0 < ae->prev_log_idx)
     {
-        raft_entry_t* e = raft_get_entry_from_idx(me_, ae->prev_log_idx);
+        raft_entry_t* e = raft_get_entry_from_idx(me_, ae->prev_log_idx);//获得上一条消息
 
+        //没获取到，失败
         if (!e)
         {
             __log(me_, "AE no log at prev_idx %d", ae->prev_log_idx);
@@ -350,16 +355,19 @@ int raft_recv_appendentries(
 
         /* 2. Reply false if log doesn't contain an entry at prevLogIndex
            whose term matches prevLogTerm (§5.3) */
-        if (raft_get_current_idx(me_) < ae->prev_log_idx)
+        if (raft_get_current_idx(me_) < ae->prev_log_idx)//如果节点当前索引小于上一个索引值 失败
             goto fail_with_current_idx;
 
-        if (e->term != ae->prev_log_term)
+        if (e->term != ae->prev_log_term)//上一条消息任期不等于指定上一条消息的任期
         {
             __log(me_, "AE term doesn't match prev_idx (ie. %d vs %d)",
                   e->term, ae->prev_log_term);
+            //当前已提交到状态机的条目需要小于上一条日志索引，如果不成立则报致命错误
             assert(me->commit_idx < ae->prev_log_idx);
             /* Delete all the following log entries because they don't match */
+            //删除已记录的指定日志
             log_delete(me->log, ae->prev_log_idx);
+            //回退一个索引值
             r->current_idx = ae->prev_log_idx - 1;
             goto fail;
         }
@@ -368,14 +376,16 @@ int raft_recv_appendentries(
     /* 3. If an existing entry conflicts with a new one (same index
        but different terms), delete the existing entry and all that
        follow it (§5.3) */
+    //强制跟随者的索引跟领导者一致，把不一致的多余日志删除
     if (ae->n_entries == 0 && 0 < ae->prev_log_idx && ae->prev_log_idx + 1 < raft_get_current_idx(me_))
     {
         assert(me->commit_idx < ae->prev_log_idx + 1);
         log_delete(me->log, ae->prev_log_idx + 1);
     }
-
+    //当前索引等于上一个日志索引
     r->current_idx = ae->prev_log_idx;
 
+    //判断消息中的日志在本地是否存在
     int i;
     for (i = 0; i < ae->n_entries; i++)
     {
@@ -394,6 +404,7 @@ int raft_recv_appendentries(
     }
 
     /* Pick up remainder in case of mismatch or missing entry */
+    //追加消息中的日志
     for (; i < ae->n_entries; i++)
     {
         int e = raft_append_entry(me_, &ae->entries[i]);
@@ -405,17 +416,20 @@ int raft_recv_appendentries(
 
     /* 4. If leaderCommit > commitIndex, set commitIndex =
         min(leaderCommit, index of most recent entry) */
+    //如果领导者的已提交状态机日志索引大于节点的日志索引
     if (raft_get_commit_idx(me_) < ae->leader_commit)
     {
         int last_log_idx = max(raft_get_current_idx(me_), 1);
+        //提交日志
         raft_set_commit_idx(me_, min(last_log_idx, ae->leader_commit));
     }
 
     /* update current leader because we accepted appendentries from it */
+    //记录当前领导者id
     me->current_leader = node;
 
     r->success = 1;
-    r->first_idx = ae->prev_log_idx + 1;
+    r->first_idx = ae->prev_log_idx + 1;//发送的消息列表中第一条消息的索引值
     return 0;
 
 fail_with_current_idx:
@@ -426,31 +440,37 @@ fail:
     return -1;
 }
 
+/**
+ * 是否同意投票
+ */
 static int __should_grant_vote(raft_server_private_t* me, msg_requestvote_t* vr)
 {
-    if (vr->term < raft_get_current_term((void*)me))
+    if (vr->term < raft_get_current_term((void*)me))//请求投票任期小于当前任期，不同意
         return 0;
 
     /* TODO: if voted for is candiate return 1 (if below checks pass) */
     /* we've already voted */
-    if (-1 != me->voted_for)
+    if (-1 != me->voted_for)//自己是候选者 不同意
         return 0;
 
-    int current_idx = raft_get_current_idx((void*)me);
+    int current_idx = raft_get_current_idx((void*)me);//当前日志索引值
 
-    if (0 == current_idx)
+    if (0 == current_idx)//没有日志 同意
         return 1;
 
     raft_entry_t* e = raft_get_entry_from_idx((void*)me, current_idx);
-    if (e->term < vr->last_log_term)
+    if (e->term < vr->last_log_term)//最后一条日志任期值小于投票请求任期值，同意
         return 1;
 
+    //消息任期值等于当前最后日志的任期值 且 索引小于或等于消息最后日志索引 同意
     if (vr->last_log_term == e->term && current_idx <= vr->last_log_idx)
         return 1;
-
+    //不同意
     return 0;
 }
-
+/**
+ * 收到投票请求(追随者)
+ */
 int raft_recv_requestvote(raft_server_t* me_,
                           int node,
                           msg_requestvote_t* vr,
@@ -463,31 +483,35 @@ int raft_recv_requestvote(raft_server_t* me_,
         raft_set_current_term(me_, vr->term);
         raft_become_follower(me_);
     }
-
+    //是否同意投票
     if (__should_grant_vote(me, vr))
     {
         /* It shouldn't be possible for a leader or candidate to grant a vote
          * Both states would have voted for themselves */
+        //节点当前状态不是领导 或者是候选者
         assert(!(raft_is_leader(me_) || raft_is_candidate(me_)));
-
+        //投票
         raft_vote(me_, node);
-        r->vote_granted = 1;
+        r->vote_granted = 1;//投票
 
         /* there must be in an election. */
-        me->current_leader = -1;
+        me->current_leader = -1;//当前无领导
 
-        me->timeout_elapsed = 0;
+        me->timeout_elapsed = 0;//投票超时时间清零
     }
     else
-        r->vote_granted = 0;
+        r->vote_granted = 0;//不同意选票
 
     __log(me_, "node requested vote: %d replying: %s",
           node, r->vote_granted == 1 ? "granted" : "not granted");
 
-    r->term = raft_get_current_term(me_);
+    r->term = raft_get_current_term(me_);//当前任期号
     return 0;
 }
 
+/**
+ * 统计投票是否占大多数
+ */
 int raft_votes_is_majority(const int num_nodes, const int nvotes)
 {
     if (num_nodes < nvotes)
@@ -496,6 +520,9 @@ int raft_votes_is_majority(const int num_nodes, const int nvotes)
     return half + 1 <= nvotes;
 }
 
+/**
+ * 请求投票消息响应(候选者)
+ */
 int raft_recv_requestvote_response(raft_server_t* me_,
                                    int node,
                                    msg_requestvote_response_t* r)
@@ -505,18 +532,19 @@ int raft_recv_requestvote_response(raft_server_t* me_,
     __log(me_, "node responded to requestvote: %d status: %s",
           node, r->vote_granted == 1 ? "granted" : "not granted");
 
-    if (!raft_is_candidate(me_))
+    if (!raft_is_candidate(me_))//如果自己当前状态不是候选者
         return 0;
 
-    assert(node < me->num_nodes);
+    assert(node < me->num_nodes);//如果响应节点数大于当前节点数
 
-    if (raft_get_current_term(me_) < r->term)
+    //已经选出领导
+    if (raft_get_current_term(me_) < r->term)//如果当前任期号小于消息任期号
     {
-        raft_set_current_term(me_, r->term);
-        raft_become_follower(me_);
+        raft_set_current_term(me_, r->term);//更新任期号
+        raft_become_follower(me_);//成为追随者
         return 0;
     }
-    else if (raft_get_current_term(me_) != r->term)
+    else if (raft_get_current_term(me_) != r->term)//消息任期不等于当前任期 忽略此消息
     {
         /* The node who voted for us would have obtained our term.
          * Therefore this is an old message we should ignore.
@@ -524,47 +552,51 @@ int raft_recv_requestvote_response(raft_server_t* me_,
         return 0;
     }
 
-    if (1 == r->vote_granted)
+    if (1 == r->vote_granted)//得票
     {
         me->votes_for_me[node] = 1;
         int votes = raft_get_nvotes_for_me(me_);
-        if (raft_votes_is_majority(me->num_nodes, votes))
-            raft_become_leader(me_);
+        if (raft_votes_is_majority(me->num_nodes, votes))//得票过半
+            raft_become_leader(me_);//成为领导
     }
 
     return 0;
 }
 
+/**
+ * 客户端请求消息
+ */
 int raft_recv_entry(raft_server_t* me_, int node, msg_entry_t* e,
                     msg_entry_response_t *r)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     int i;
 
-    if (!raft_is_leader(me_))
+    if (!raft_is_leader(me_))//不是learder
         return -1;
 
     __log(me_, "received entry from: %d", node);
 
-    raft_entry_t ety;
-    ety.term = me->current_term;
-    ety.id = e->id;
+    raft_entry_t ety;//创建消息结构
+    ety.term = me->current_term; //消息任期
+    ety.id = e->id; //消息id
     memcpy(&ety.data, &e->data, sizeof(raft_entry_data_t));
-    raft_append_entry(me_, &ety);
+    raft_append_entry(me_, &ety);//追加消息
     for (i = 0; i < me->num_nodes; i++)
         /* Only send new entries.
          * Don't send the entry to peers who are behind, to prevent them from
          * becomming congested. */
         if (me->nodeid != i)
         {
+            //判断节点下一个要发送的id是不是等于当前消息id
             int next_idx = raft_node_get_next_idx(raft_get_node(me_, i));
-            if (next_idx == raft_get_current_idx(me_))
+            if (next_idx == raft_get_current_idx(me_))//可以发送消息
                 raft_send_appendentries(me_, i);
         }
 
     /* if we're the only node, we can consider the entry committed */
-    if (1 == me->num_nodes)
-        me->commit_idx = raft_get_current_idx(me_);
+    if (1 == me->num_nodes)//如果只有一个节点
+        me->commit_idx = raft_get_current_idx(me_);//已经应用的状态机的idx
 
     r->id = e->id;
     r->idx = raft_get_current_idx(me_);

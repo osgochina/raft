@@ -150,7 +150,7 @@ typedef struct
     int current_idx;//当前日志idx
 
     /** The first idx that we received within the appendentries message */
-    int first_idx;//第一个日志的idx
+    int first_idx;//收到消息中第一条日志的索引值
 } msg_appendentries_response_t;
 
 typedef void* raft_server_t; //对外提供的raft server对象
