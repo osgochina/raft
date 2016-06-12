@@ -22,6 +22,34 @@ Building
 
    make tests
 
+Quality Assurance
+=================
+
+We use the following methods to ensure that the library is safe:
+
+* A `simulator <https://github.com/willemt/virtraft>`_ is used to test the Raft invariants on unreliable networks
+* `Fuzzing/property-based-testing <https://github.com/willemt/virtraft/blob/master/tests/test_fuzzer.py>`_ via `Hypothesis <https://github.com/DRMacIver/hypothesis/>`_
+* All bugs have regression tests
+* Many unit tests
+* `Usage <https://github.com/willemt/ticketd>`_
+
+Single file amalgamation
+========================
+
+The source has been amalgamated into a single ``raft.h`` header file.
+Use `clib <https://github.com/clibs/clib>`_ to download the source into your project's ``deps`` folder, ie:
+
+.. code-block:: bash
+
+    brew install clib
+    clib install willemt/raft_amalgamation
+
+The file is stored in the ``deps`` folder like below:
+
+.. code-block:: bash
+
+    deps/raft/raft.h
+
 How to integrate with this library
 ==================================
 
@@ -44,12 +72,13 @@ We tell the Raft server what the cluster configuration is by using the ``raft_ad
 
 .. code-block:: c
 
-    raft_add_node(raft, connection_user_data, peer_is_self);
+    raft_add_node(raft, connection_user_data, node_id, peer_is_self);
 
 Where:
 
 * ``connection_user_data`` is a pointer to user data.
 * ``peer_is_self`` is boolean indicating that this is the current server's server index.
+* ``node_id`` is the unique integer ID of the node. Peers use this to identify themselves. This SHOULD be a random integer.
 
 .. [#] AKA "Raft peer"
 .. [#] We have to also include the Raft server itself in the raft_add_node calls. When we call raft_add_node for the Raft server, we set peer_is_self to 1. 
@@ -98,7 +127,7 @@ We call ``raft_recv_entry`` when we want to append the entry to the log.
 .. code-block:: c
 
     msg_entry_response_t response;
-    e = raft_recv_entry(raft, node_idx, &entry, &response);
+    e = raft_recv_entry(raft,  &entry, &response);
 
 You should populate the ``entry`` struct with the log entry the client has sent. After the call completes the ``response`` parameter is populated and can be used by the ``raft_msg_entry_response_committed`` function to check if the log entry has been committed or not.
 
@@ -114,7 +143,7 @@ The ``raft_recv_entry`` function does not block! This means you will need to imp
 
     msg_entry_response_t response;
 
-    e = raft_recv_entry(sv->raft, sv->node_idx, &entry, &response);
+    e = raft_recv_entry(sv->raft, &entry, &response);
     if (0 != e)
         return h2oh_respond_with_error(req, 500, "BAD");
 
@@ -142,14 +171,14 @@ The ``raft_recv_entry`` function does not block! This means you will need to imp
 
 .. code-block:: c
 
-    e = raft_recv_appendentries_response(sv->raft, conn->node_idx, &m.aer);
+    e = raft_recv_appendentries_response(sv->raft, conn->node, &m.aer);
     uv_cond_signal(&sv->appendentries_received);
 
 **Redirecting the client to the leader**
 
 When we receive an entry log from the client it's possible we might not be a leader.
 
-If we aren't currently the leader of the raft cluster, we MUST send a redirect error message to the client. This is so that the client can connect directly to the leader in future connections. This enables future requests to be faster until the leader changes.
+If we aren't currently the leader of the raft cluster, we MUST send a redirect error message to the client. This is so that the client can connect directly to the leader in future connections. This enables future requests to be faster (ie. no redirects are required after the first redirect until the leader changes).
 
 We use the ``raft_get_current_leader`` function to check who is the current leader.
 
@@ -158,18 +187,16 @@ We use the ``raft_get_current_leader`` function to check who is the current lead
 .. code-block:: c
 
     /* redirect to leader if needed */
-    int leader = raft_get_current_leader(sv->raft);
-    if (-1 == leader)
+    raft_node_t* leader = raft_get_current_leader_node(sv->raft);
+    if (!leader)
     {
         return h2oh_respond_with_error(req, 503, "Leader unavailable");
     }
-    else if (leader != sv->node_idx)
+    else if (raft_node_get_id(leader) != sv->node_id)
     {
         /* send redirect */
-        raft_node_t* node = raft_get_node(sv->raft, leader);
-        peer_connection_t* conn = raft_node_get_udata(node);
+        peer_connection_t* conn = raft_node_get_udata(leader);
         char leader_url[LEADER_URL_LEN];
-
         static h2o_generator_t generator = { NULL, NULL };
         static h2o_iovec_t body = { .base = "", .len = 0 };
         req->res.status = 301;
@@ -215,7 +242,7 @@ The following callbacks MUST be implemented: ``send_requestvote``, ``send_append
 
 **send_requestvote()**
 
-For this callback we have to serialize a ``msg_requestvote_t`` struct, and then send it to the peer identified by ``node_idx``.
+For this callback we have to serialize a ``msg_requestvote_t`` struct, and then send it to the peer identified by ``node``.
 
 *Example from ticketd showing how the callback is implemented:*
 
@@ -224,11 +251,10 @@ For this callback we have to serialize a ``msg_requestvote_t`` struct, and then 
     static int __send_requestvote(
         raft_server_t* raft,
         void *udata,
-        int node_idx,
+        raft_node_t* node,
         msg_requestvote_t* m
         )
     {
-        raft_node_t* node = raft_get_node(raft, node_idx);
         peer_connection_t* conn = raft_node_get_udata(node);
 
         uv_buf_t bufs[1];
@@ -238,16 +264,15 @@ For this callback we have to serialize a ``msg_requestvote_t`` struct, and then 
             .rv                = *m
         };
         __peer_msg_serialize(tpl_map("S(I$(IIII))", &msg), bufs, buf);
-        conn->write.data = conn;
-        e = uv_write(&conn->write, conn->stream, bufs, 1, __peer_write_cb);
-        if (-1 == e)
+        int e = uv_try_write(conn->stream, bufs, 1);
+        if (e < 0)
             uv_fatal(e);
         return 0;
     }
 
 **send_appendentries()**
 
-For this callback we have to serialize a ``msg_appendentries_t`` struct, and then send it to the peer identified by ``node_idx``. This struct is more complicated to serialize because the ``m->entries`` array might be populated.
+For this callback we have to serialize a ``msg_appendentries_t`` struct, and then send it to the peer identified by ``node``. This struct is more complicated to serialize because the ``m->entries`` array might be populated.
 
 *Example from ticketd showing how the callback is implemented:*
 
@@ -256,13 +281,12 @@ For this callback we have to serialize a ``msg_appendentries_t`` struct, and the
     static int __send_appendentries(
         raft_server_t* raft,
         void *user_data,
-        int node_idx,
+        raft_node_t* node,
         msg_appendentries_t* m
         )
     {
         uv_buf_t bufs[3];
 
-        raft_node_t* node = raft_get_node(raft, node_idx);
         peer_connection_t* conn = raft_node_get_udata(node);
 
         char buf[RAFT_BUFLEN], *ptr = buf;
@@ -287,7 +311,11 @@ For this callback we have to serialize a ``msg_appendentries_t`` struct, and the
             };
 
             /* list of entries */
-            tpl_node *tn = tpl_map("IIB", &m->entries[0].id, &m->entries[0].term, &tb);
+            tpl_node *tn = tpl_map("IIIB",
+                &m->entries[0].id,
+                &m->entries[0].term,
+                &m->entries[0].type,
+                &tb);
             size_t sz;
             tpl_pack(tn, 0);
             tpl_dump(tn, TPL_GETSIZE, &sz);
@@ -295,9 +323,8 @@ For this callback we have to serialize a ``msg_appendentries_t`` struct, and the
             assert(0 == e);
             bufs[1].len = sz;
             bufs[1].base = ptr;
-
-            e = uv_write(&conn->write, conn->stream, bufs, 2, __peer_write_cb);
-            if (-1 == e)
+            e = uv_try_write(conn->stream, bufs, 2);
+            if (e < 0)
                 uv_fatal(e);
 
             tpl_free(tn);
@@ -305,8 +332,8 @@ For this callback we have to serialize a ``msg_appendentries_t`` struct, and the
         else
         {
             /* keep alive appendentries only */
-            e = uv_write(&conn->write, conn->stream, bufs, 1, __peer_write_cb);
-            if (-1 == e)
+            e = uv_try_write(conn->stream, bufs, 1);
+            if (e < 0)
                 uv_fatal(e);
         }
 
@@ -316,7 +343,7 @@ For this callback we have to serialize a ``msg_appendentries_t`` struct, and the
 
 **applylog()**
 
-This callback is all what is needed to interface the FSM with the Raft library.
+This callback is all what is needed to interface the FSM with the Raft library. Depending on your application, you might want to save the commit_idx to disk inside this callback.
 
 **persist_vote() & persist_term()**
 
@@ -364,21 +391,44 @@ The table below shows the structs that you need to deserialize-to or deserialize
 
     msg_appendentries_t ae;
     msg_appendentries_response_t response;
-    char buf_in[1024]. buf_out[1024];
+    char buf_in[1024], buf_out[1024];
     size_t len_in, len_out;
 
     read(socket, buf_in, &len_in);
 
     deserialize_appendentries(buf_in, len_in, &ae);
 
-    e = raft_recv_requestvote(sv->raft, conn->node_idx, &ae, &response);
+    e = raft_recv_requestvote(sv->raft, conn->node, &ae, &response);
 
     serialize_appendentries_response(&response, buf_out, &len_out);
 
     write(socket, buf_out, &len_out);
 
+Membership changes
+------------------
+Membership changes are managed on the Raft log. You need two log entries to add a server to the cluster. While to remove you only need one log entry. There are two log entries for adding a server because we need to ensure that the new server's log is up to date before it can take part in voting.
+
+It's highly recommended that when a node is added to the cluster that its node ID is random. This is especially important if the server was once connected to the cluster.
+
+**Adding a node**
+
+1. Append the configuration change using ``raft_recv_entry``. Make sure the entry has the type set to ``RAFT_LOGTYPE_ADD_NONVOTING_NODE``
+
+2. Inside the ``log_offer`` callback, when a log with type ``RAFT_LOGTYPE_ADD_NONVOTING_NODE`` is detected, we add a non-voting node by calling ``raft_add_non_voting_node``.
+
+3. Once ``node_has_sufficient_logs`` callback fires, append a configuration finalization log entry using ``raft_recv_entry``. Make sure the entry has a type set to ``RAFT_LOGTYPE_ADD_NODE``
+
+4. Inside the ``log_offer`` callback, when you receive a log with type ``RAFT_LOGTYPE_ADD_NODE``, we then set the node to voting by using ``raft_add_node``
+
+**Removing a node**
+
+1. Append the configuration change using ``raft_recv_entry``. Make sure the entry has the type set to ``RAFT_LOGTYPE_REMOVE_NODE``
+
+2. Inside the ``log_offer`` callback, when a log with type ``RAFT_LOGTYPE_REMOVE_NODE`` is detected, we remove the node by calling ``raft_remove_node``
+
+3. Once the ``RAFT_LOGTYPE_REMOVE_NODE`` configuration change log is applied in the ``applylog`` callback we shutdown the server if it is to be removed.
+
 Todo
 ====
 
-- Member changes
 - Log compaction

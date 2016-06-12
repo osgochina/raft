@@ -5,7 +5,6 @@
  *
  * @file
  * @author Willem Thiart himself@willemthiart.com
- * @version 0.1
  */
 
 #include <stdlib.h>
@@ -34,7 +33,10 @@ void raft_set_request_timeout(raft_server_t* me_, int millisec)
 
 int raft_get_nodeid(raft_server_t* me_)
 {
-    return ((raft_server_private_t*)me_)->nodeid;
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    if (!me->node)
+        return -1;
+    return raft_node_get_id(me->node);
 }
 
 int raft_get_election_timeout(raft_server_t* me_)
@@ -52,6 +54,16 @@ int raft_get_num_nodes(raft_server_t* me_)
     return ((raft_server_private_t*)me_)->num_nodes;
 }
 
+int raft_get_num_voting_nodes(raft_server_t* me_)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    int i, num = 0;
+    for (i = 0; i < me->num_nodes; i++)
+        if (raft_node_is_voting(me->nodes[i]))
+            num++;
+    return num;
+}
+
 int raft_get_timeout_elapsed(raft_server_t* me_)
 {
     return ((raft_server_private_t*)me_)->timeout_elapsed;
@@ -65,7 +77,8 @@ int raft_get_log_count(raft_server_t* me_)
 
 int raft_get_voted_for(raft_server_t* me_)
 {
-    return ((raft_server_private_t*)me_)->voted_for;
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    return me->voted_for;
 }
 
 /**
@@ -123,7 +136,7 @@ void raft_set_state(raft_server_t* me_, int state)
     raft_server_private_t* me = (raft_server_private_t*)me_;
     /* if became the leader, then update the current leader entry */
     if (state == RAFT_STATE_LEADER)
-        me->current_leader = me->nodeid;
+        me->current_leader = me->node;
     me->state = state;
 }
 
@@ -135,13 +148,42 @@ int raft_get_state(raft_server_t* me_)
 raft_node_t* raft_get_node(raft_server_t *me_, int nodeid)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
+    int i;
 
-    if (nodeid < 0 || me->num_nodes <= nodeid)//要获取的node不能小于0也不能大于节点数
-        return NULL;
-    return (raft_node_t*)me->nodes[nodeid];//返回要获取的节点对象
+    for (i = 0; i < me->num_nodes; i++)
+        if (nodeid == raft_node_get_id(me->nodes[i]))
+            return me->nodes[i];
+
+    return NULL;
+}
+
+raft_node_t* raft_get_my_node(raft_server_t *me_)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    int i;
+
+    for (i = 0; i < me->num_nodes; i++)
+        if (raft_get_nodeid(me_) == raft_node_get_id(me->nodes[i]))
+            return me->nodes[i];
+
+    return NULL;
+}
+
+raft_node_t* raft_get_node_from_idx(raft_server_t* me_, const int idx)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    return me->nodes[idx];
 }
 
 int raft_get_current_leader(raft_server_t* me_)
+{
+    raft_server_private_t* me = (void*)me_;
+    if (me->current_leader)
+        return raft_node_get_id(me->current_leader);
+    return -1;
+}
+
+raft_node_t* raft_get_current_leader_node(raft_server_t* me_)
 {
     raft_server_private_t* me = (void*)me_;
     return me->current_leader;
@@ -177,4 +219,9 @@ int raft_get_last_log_term(raft_server_t* me_)
             return ety->term;
     }
     return 0;
+}
+
+int raft_is_connected(raft_server_t* me_)
+{
+    return ((raft_server_private_t*)me_)->connected;
 }

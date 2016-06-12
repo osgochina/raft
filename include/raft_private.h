@@ -1,6 +1,12 @@
-#include "raft.h"
 #ifndef RAFT_PRIVATE_H_
 #define RAFT_PRIVATE_H_
+#include "raft.h"
+enum {
+    RAFT_NODE_STATUS_DISCONNECTED,
+    RAFT_NODE_STATUS_CONNECTED,
+    RAFT_NODE_STATUS_CONNECTING,
+    RAFT_NODE_STATUS_DISCONNECTING
+};
 
 /**
  * Copyright (c) 2013, Willem-Hendrik Thiart
@@ -9,7 +15,6 @@
  *
  * @file
  * @author Willem Thiart himself@willemthiart.com
- * @version 0.1
  */
 //raft server 真正对象
 typedef struct {
@@ -63,17 +68,23 @@ typedef struct {
 
     /* what this node thinks is the node ID of the current leader, or -1 if
      * there isn't a known current leader. */
-    //当前的领导id 这个值只会为当前领导的nodeid或者-1,等于-1的时候说明还不知道当前领导是谁
-    int current_leader;
+    //当前的领导者
+    raft_node_t* current_leader;
 
     /* callbacks */
     //回调函数列表
     raft_cbs_t cb;
     void* udata;
+    //当前node
+    raft_node_t* node;
 
-    /* my node ID */
-    //当前nodeid
-    int nodeid;
+    /* the log which has a voting cfg change, otherwise -1 */
+    int voting_cfg_change_log_idx;
+
+    /* our membership with the cluster is confirmed (ie. configuration log was
+     * committed) */
+    int connected;
+
 } raft_server_private_t;
 
 //开始选举
@@ -86,16 +97,16 @@ void raft_become_candidate(raft_server_t* me);
 //成为追随者
 void raft_become_follower(raft_server_t* me);
 //选举投票
-void raft_vote(raft_server_t* me, int node);
+void raft_vote(raft_server_t* me, raft_node_t* node);
 //设置当前learder的任期号
 void raft_set_current_term(raft_server_t* me,int term);
 
 /**
  * @return 0 on error */
 //发送投票请求
-int raft_send_requestvote(raft_server_t* me, int node);
+int raft_send_requestvote(raft_server_t* me, raft_node_t* node);
 
-void raft_send_appendentries(raft_server_t* me, int node);
+int raft_send_appendentries(raft_server_t* me, raft_node_t* node);
 
 void raft_send_appendentries_all(raft_server_t* me_);
 
@@ -110,16 +121,13 @@ int raft_apply_entry(raft_server_t* me_);
  * @return 0 if unsuccessful */
 int raft_append_entry(raft_server_t* me_, raft_entry_t* c);
 
-void raft_set_commit_idx(raft_server_t* me, int commit_idx);
-int raft_get_commit_idx(raft_server_t* me_);
-
 void raft_set_last_applied_idx(raft_server_t* me, int idx);
 
 void raft_set_state(raft_server_t* me_, int state);
 
 int raft_get_state(raft_server_t* me_);
 
-raft_node_t* raft_node_new(void* udata);
+raft_node_t* raft_node_new(void* udata, int id);
 
 void raft_node_set_next_idx(raft_node_t* node, int nextIdx);
 
@@ -127,6 +135,18 @@ void raft_node_set_match_idx(raft_node_t* node, int matchIdx);
 
 int raft_node_get_match_idx(raft_node_t* me_);
 
+void raft_node_vote_for_me(raft_node_t* me_, const int vote);
+
+int raft_node_has_vote_for_me(raft_node_t* me_);
+
+void raft_node_set_has_sufficient_logs(raft_node_t* me_);
+
+int raft_node_has_sufficient_logs(raft_node_t* me_);
+
 int raft_votes_is_majority(const int nnodes, const int nvotes);
+
+void raft_pop_log(raft_server_t* me_, raft_entry_t* ety, const int idx);
+
+void raft_offer_log(raft_server_t* me_, raft_entry_t* ety, const int idx);
 
 #endif /* RAFT_PRIVATE_H_ */

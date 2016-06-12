@@ -16,6 +16,9 @@ UNAME := $(shell uname)
 ifeq ($(UNAME), Darwin)
 SHAREDFLAGS = -dynamiclib
 SHAREDEXT = dylib
+# We need to include the El Capitan specific /usr/includes, aargh
+CFLAGS += -I/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk/usr/include/
+CFLAGS += -fsanitize=address
 else
 SHAREDFLAGS = -shared
 SHAREDEXT = so
@@ -52,6 +55,10 @@ tests: src/raft_server.c src/raft_server_properties.c src/raft_log.c src/raft_no
 	$(CC) $(CFLAGS) -o tests_main $^
 	./tests_main
 	gcov raft_server.c
+
+.PHONY: amalgamation
+amalgamation:
+	./scripts/amalgamate.sh > raft.h
 
 clean:
 	@rm -f $(TEST_DIR)/main_test.c *.o $(GCOV_OUTPUT); \

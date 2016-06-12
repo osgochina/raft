@@ -6,7 +6,6 @@
  * @file
  * @brief Implementation of a Raft server
  * @author Willem Thiart himself@willemthiart.com
- * @version 0.1
  */
 
 #include <stdlib.h>
@@ -21,11 +20,16 @@
 #include "raft_log.h"
 #include "raft_private.h"
 
+#ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+#ifndef max
 #define max(a, b) ((a) < (b) ? (b) : (a))
+#endif
 
 //记录运行时log
-static void __log(raft_server_t *me_, const char *fmt, ...)
+static void __log(raft_server_t *me_, raft_node_t* node, const char *fmt, ...)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     char buf[1024];
@@ -35,7 +39,7 @@ static void __log(raft_server_t *me_, const char *fmt, ...)
     vsprintf(buf, fmt, args);
 
     if (me->cb.log)
-        me->cb.log(me_, me->udata, buf);
+        me->cb.log(me_, node, me->udata, buf);
 }
 
 /**
@@ -47,17 +51,20 @@ raft_server_t* raft_new()
     //申请内存
     raft_server_private_t* me =
         (raft_server_private_t*)calloc(1, sizeof(raft_server_private_t));
-    if (!me)
+
+    if (!me){
         return NULL;
-    me->current_term = 0; //当前任期号
-    me->voted_for = -1;   //当前获得选票的候选人id
-    me->timeout_elapsed = 0; //超时时间，从上一次获得心跳包到现在的时间
-    me->request_timeout = 200; //请求超时时间200毫秒
+    }
+    me->current_term = 0;//当前任期号
+    me->voted_for = -1;//当前获得选票的候选人id
+    me->timeout_elapsed = 0;//超时时间，从上一次获得心跳包到现在的时间
+    me->request_timeout = 200;//请求超时时间200毫秒
     me->election_timeout = 1000; //选举超时时间1秒
-    me->log = log_new(); //log存取对象
+    me->log = log_new();//log存取对象
+    me->voting_cfg_change_log_idx = -1;
     raft_set_state((raft_server_t*)me, RAFT_STATE_FOLLOWER);//设置当前对象位跟随者
-    me->current_leader = -1;//当前领导这id为-1
-    return (raft_server_t*)me; //返回对象
+    me->current_leader = NULL;//当前领导这id为NULL
+    return (raft_server_t*)me;
 }
 
 /**
@@ -84,15 +91,44 @@ void raft_free(raft_server_t* me_)
 }
 
 /**
- * 选举开始
+ *
  */
+void raft_clear(raft_server_t* me_)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    me->current_term = 0;
+    me->voted_for = -1;
+    me->timeout_elapsed = 0;
+    me->voting_cfg_change_log_idx = -1;
+    raft_set_state((raft_server_t*)me, RAFT_STATE_FOLLOWER);
+    me->current_leader = NULL;
+    me->commit_idx = 0;
+    me->last_applied_idx = 0;
+    me->num_nodes = 0;
+    me->node = NULL;
+    me->voting_cfg_change_log_idx = 0;
+    log_clear(me->log);
+}
+
+void raft_delete_entry_from_idx(raft_server_t* me_, int idx)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    if (idx <= me->voting_cfg_change_log_idx)
+        me->voting_cfg_change_log_idx = -1;
+
+    log_delete(me->log, idx);
+}
+
 void raft_election_start(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
     //记录开始选举的日志
-    __log(me_, "election starting: %d %d, term: %d",
-          me->election_timeout, me->timeout_elapsed, me->current_term);
+    __log(me_, NULL, "election starting: %d %d, term: %d ci: %d",
+          me->election_timeout, me->timeout_elapsed, me->current_term,
+          raft_get_current_idx(me_));
     //改变自己身份，成为候选者，进行候选者应该做的工作
     raft_become_candidate(me_);
 }
@@ -103,20 +139,19 @@ void raft_become_leader(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     int i;
-
-    __log(me_, "becoming leader");
+    __log(me_, NULL, "becoming leader term:%d", raft_get_current_term(me_));
     //成为领导人
     raft_set_state(me_, RAFT_STATE_LEADER);
-    //对除了自己的节点发送成为领导人的消息
+        //对除了自己的节点发送成为领导人的消息
     for (i = 0; i < me->num_nodes; i++)
     {
-        if (me->nodeid != i)
-        {
-            raft_node_t* node = raft_get_node(me_, i);//获取指定节点
-            raft_node_set_next_idx(node, raft_get_current_idx(me_) + 1);//设置下一次需要发送给该节点的日志索引值
-            raft_node_set_match_idx(node, 0);//设置已经复制给该节点的日志索引值 选举完清零
-            raft_send_appendentries(me_, i);//添加条目到该节点
-        }
+        if (me->node == me->nodes[i])
+            continue;
+
+        raft_node_t* node = me->nodes[i];//获取指定节点
+        raft_node_set_next_idx(node, raft_get_current_idx(me_) + 1);//设置下一次需要发送给该节点的日志索引值
+        raft_node_set_match_idx(node, 0);//设置已经复制给该节点的日志索引值 选举完清零
+        raft_send_appendentries(me_, node);//添加条目到该节点
     }
 }
 
@@ -128,25 +163,24 @@ void raft_become_candidate(raft_server_t* me_)
     raft_server_private_t* me = (raft_server_private_t*)me_;
     int i;
 
-    __log(me_, "becoming candidate");
+    __log(me_, NULL, "becoming candidate");
 
-    memset(me->votes_for_me, 0, sizeof(int) * me->num_nodes);//设置node number 位置位0
-    me->current_term += 1; //当前任期+1
-    raft_vote(me_, me->nodeid);//跳票给自己
-    me->current_leader = -1;//当前leader = -1
-    raft_set_state(me_, RAFT_STATE_CANDIDATE);//设置自己当前状态位候选者
+    raft_set_current_term(me_, raft_get_current_term(me_) + 1);
+    for (i = 0; i < me->num_nodes; i++)
+        raft_node_vote_for_me(me->nodes[i], 0);
+    raft_vote(me_, me->node);
+    me->current_leader = NULL;
+    raft_set_state(me_, RAFT_STATE_CANDIDATE);
 
-    /* we need a random factor here to prevent simultaneous candidates */
-    /* TODO: this should probably be lower */
-    /*
-     * 选举超时时间 防止多个候选者瓜分选票,
-     * 这样就没办法选出leader了所以需要把每个候选者，选举的超时时间随机设置
-     */
-    me->timeout_elapsed = rand() % me->election_timeout;
+    /* We need a random factor here to prevent simultaneous candidates.
+     * If the randomness is always positive it's possible that a fast node
+     * would deadlock the cluster by always gaining a headstart. To prevent
+     * this, we allow a negative randomness as a potential handicap. */
+    me->timeout_elapsed = me->election_timeout - 2 * (rand() % me->election_timeout);
 
-    for (i = 0; i < me->num_nodes; i++)//对除了自己以外的所有节点请求投票
-        if (me->nodeid != i)
-            raft_send_requestvote(me_, i);
+    for (i = 0; i < me->num_nodes; i++)
+        if (me->node != me->nodes[i] && raft_node_is_voting(me->nodes[i]))
+            raft_send_requestvote(me_, me->nodes[i]);
 }
 
 /**
@@ -154,7 +188,7 @@ void raft_become_candidate(raft_server_t* me_)
  */
 void raft_become_follower(raft_server_t* me_)
 {
-    __log(me_, "becoming follower");
+    __log(me_, NULL, "becoming follower");
     raft_set_state(me_, RAFT_STATE_FOLLOWER);
 }
 
@@ -168,22 +202,27 @@ int raft_periodic(raft_server_t* me_, int msec_since_last_period)
 
     me->timeout_elapsed += msec_since_last_period;
 
-    if (me->state == RAFT_STATE_LEADER)//如果服务状态是领导
+    /* Only one voting node means it's safe for us to become the leader */
+    if (1 == raft_get_num_voting_nodes(me_) &&
+        raft_node_is_voting(raft_get_my_node((void*)me)) &&
+        !raft_is_leader(me_))
+        raft_become_leader(me_);
+
+    if (me->state == RAFT_STATE_LEADER)
     {
         if (me->request_timeout <= me->timeout_elapsed)//如果已经到了心跳的时间
             raft_send_appendentries_all(me_);//对所有节点发送心跳包
     }
     else if (me->election_timeout <= me->timeout_elapsed)//如果选举超时时间小于心跳时间
     {
-        if (1 == me->num_nodes)//只有一个节点
-            raft_become_leader(me_);//则自己成为learder
-        else
-            raft_election_start(me_);//否则开始选举
+        if (1 < raft_get_num_voting_nodes(me_) &&
+            raft_node_is_voting(raft_get_my_node(me_)))
+            raft_election_start(me_);
     }
 
-    if (me->last_applied_idx < me->commit_idx)//当前状态机条目日志索引小于已提交日志条目
-        if (-1 == raft_apply_entry(me_))//应用日志
-            return -1;
+    if (me->last_applied_idx < me->commit_idx)
+        return raft_apply_entry(me_);
+
 
     return 0;
 }
@@ -194,27 +233,41 @@ int raft_periodic(raft_server_t* me_, int msec_since_last_period)
 raft_entry_t* raft_get_entry_from_idx(raft_server_t* me_, int etyidx)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
-    return log_get_from_idx(me->log, etyidx);
+    return log_get_at_idx(me->log, etyidx);
+}
+
+int raft_voting_change_is_in_progress(raft_server_t* me_)
+{
+    return ((raft_server_private_t*)me_)->voting_cfg_change_log_idx != -1;
 }
 
 /**
  * 提交日志条目响应
  */
 int raft_recv_appendentries_response(raft_server_t* me_,
-                                     int node_idx,
+                                     raft_node_t* node,
                                      msg_appendentries_response_t* r)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    __log(me_,
-          "received appendentries response node: %d %s cidx: %d 1stidx: %d",
-          node_idx, r->success == 1 ? "success" : "fail", r->current_idx,
+    __log(me_, node,
+          "received appendentries response %s ci:%d rci:%d 1stidx:%d",
+          r->success == 1 ? "SUCCESS" : "fail",
+          raft_get_current_idx(me_),
+          r->current_idx,
           r->first_idx);
 
-    if (!raft_is_leader(me_))//如果已经不是领导了。则返回失败
+
+    if (!node)
         return -1;
 
-    raft_node_t* node = raft_get_node(me_, node_idx);//获得此日志节点
+    /* Stale response -- ignore */
+    if (r->current_idx != 0 && r->current_idx <= raft_node_get_match_idx(node))
+        return 0;
+
+    if (!raft_is_leader(me_))
+        return -1;
+
 
     /* If response contains term T > currentTerm: set currentTerm = T
        and convert to follower (§5.3) */
@@ -227,7 +280,12 @@ int raft_recv_appendentries_response(raft_server_t* me_,
     else if (me->current_term != r->term)//如果当前任期不等于响应任期，则忽略
         return 0;
 
-    if (0 == r->success)//响应失败
+
+    /* stop processing, this is a node we don't have in our configuration */
+    if (!node)
+        return 0;
+
+    if (0 == r->success)
     {
         /* If AppendEntries fails because of log inconsistency:
            decrement nextIndex and retry (§5.3) */
@@ -248,22 +306,29 @@ int raft_recv_appendentries_response(raft_server_t* me_,
 
         /* retry */
         //重新尝试发送该日志
-        raft_send_appendentries(me_, node_idx);
+        raft_send_appendentries(me_, node);
         return 0;
     }
 
     //响应的日志索引值<= 当前索引值 则出错
     assert(r->current_idx <= raft_get_current_idx(me_));
 
-    /* response to a repeat transmission -- ignore */
-    //响应索引值等于该节点所需要发送的最高值
-    if (raft_node_get_match_idx(node) == r->current_idx)
-        return 0;
-    //获得该节点已发送的最高日志索引值
     raft_node_set_next_idx(node, r->current_idx + 1);
     //设置该节点所发送的日志最高索引值
     raft_node_set_match_idx(node, r->current_idx);
 
+
+    if (!raft_node_is_voting(node) &&
+        !raft_voting_change_is_in_progress(me_) &&
+        raft_get_current_idx(me_) <= r->current_idx + 1 &&
+        me->cb.node_has_sufficient_logs &&
+        0 == raft_node_has_sufficient_logs(node)
+        )
+    {
+        int e = me->cb.node_has_sufficient_logs(me_, me->udata, node);
+        if (0 == e)
+            raft_node_set_has_sufficient_logs(node);
+    }
     //更新已提交idx
     /* Update commit idx */
     int votes = 1; /* include me */ //已提交此日志的选票
@@ -271,7 +336,7 @@ int raft_recv_appendentries_response(raft_server_t* me_,
     int i;
     for (i = 0; i < me->num_nodes; i++)
     {
-        if (me->nodeid == i)
+        if (me->node == me->nodes[i] || !raft_node_is_voting(me->nodes[i]))
             continue;
 
         int match_idx = raft_node_get_match_idx(me->nodes[i]);//获取每个节点的已发送的最高日志索引值
@@ -284,13 +349,13 @@ int raft_recv_appendentries_response(raft_server_t* me_,
         }
     }
     //保证大于一半的节点提交保持的此日志，这learder提交此日志进状态机
-    if (me->num_nodes / 2 < votes && raft_get_commit_idx(me_) < point)
+    if (raft_get_num_voting_nodes(me_) / 2 < votes && raft_get_commit_idx(me_) < point)
         raft_set_commit_idx(me_, point);
 
     /* Aggressively send remaining entries */
     //积极的发送剩余未提交的条目
     if (raft_get_entry_from_idx(me_, raft_node_get_next_idx(node)))
-        raft_send_appendentries(me_, node_idx);
+        raft_send_appendentries(me_, node);
 
     /* periodic applies committed entries lazily */
 
@@ -301,7 +366,7 @@ int raft_recv_appendentries_response(raft_server_t* me_,
  */
 int raft_recv_appendentries(
     raft_server_t* me_,
-    const int node,
+    raft_node_t* node,
     msg_appendentries_t* ae,
     msg_appendentries_response_t *r
     )
@@ -311,9 +376,9 @@ int raft_recv_appendentries(
     me->timeout_elapsed = 0;//超时时间，从上一次获得心跳包到现在的时间 置0
 
     if (0 < ae->n_entries)//消息中的日志数目大于0
-        __log(me_, "recvd appendentries from: %d, %d %d %d %d #%d",
-              node,
+        __log(me_, node, "recvd appendentries t:%d ci:%d lc:%d pli:%d plt:%d #%d",
               ae->term,
+              raft_get_current_idx(me_),
               ae->leader_commit,
               ae->prev_log_idx,
               ae->prev_log_term,
@@ -324,18 +389,19 @@ int raft_recv_appendentries(
     //如果服务当前状态是候选者 且任期号跟消息中的任期号一致
     if (raft_is_candidate(me_) && me->current_term == ae->term)
     {
-        me->voted_for = -1;//清空选票
-        raft_become_follower(me_);//成为追随者
+        raft_become_follower(me_);
     }
     else if (me->current_term < ae->term)//任期小于消息任期
     {
-        raft_set_current_term(me_, ae->term);//更新节点当前任期
-        raft_become_follower(me_);//成为追随者
+        raft_set_current_term(me_, ae->term);
+        r->term = ae->term;
+        raft_become_follower(me_);
     }
     else if (ae->term < me->current_term)//消息任期比当前任期小 返回失败状态
     {
         /* 1. Reply false if term < currentTerm (§5.1) */
-        __log(me_, "AE term is less than current term");
+        __log(me_, node, "AE term %d is less than current term %d",
+              ae->term, me->current_term);
         goto fail_with_current_idx;
     }
 
@@ -349,7 +415,7 @@ int raft_recv_appendentries(
         //没获取到，失败
         if (!e)
         {
-            __log(me_, "AE no log at prev_idx %d", ae->prev_log_idx);
+            __log(me_, node, "AE no log at prev_idx %d", ae->prev_log_idx);
             goto fail_with_current_idx;
         }
 
@@ -360,14 +426,11 @@ int raft_recv_appendentries(
 
         if (e->term != ae->prev_log_term)//上一条消息任期不等于指定上一条消息的任期
         {
-            __log(me_, "AE term doesn't match prev_idx (ie. %d vs %d)",
-                  e->term, ae->prev_log_term);
-            //当前已提交到状态机的条目需要小于上一条日志索引，如果不成立则报致命错误
+            __log(me_, node, "AE term doesn't match prev_term (ie. %d vs %d) ci:%d pli:%d",
+                  e->term, ae->prev_log_term, raft_get_current_idx(me_), ae->prev_log_idx);
             assert(me->commit_idx < ae->prev_log_idx);
             /* Delete all the following log entries because they don't match */
-            //删除已记录的指定日志
-            log_delete(me->log, ae->prev_log_idx);
-            //回退一个索引值
+            raft_delete_entry_from_idx(me_, ae->prev_log_idx);
             r->current_idx = ae->prev_log_idx - 1;
             goto fail;
         }
@@ -380,7 +443,7 @@ int raft_recv_appendentries(
     if (ae->n_entries == 0 && 0 < ae->prev_log_idx && ae->prev_log_idx + 1 < raft_get_current_idx(me_))
     {
         assert(me->commit_idx < ae->prev_log_idx + 1);
-        log_delete(me->log, ae->prev_log_idx + 1);
+        raft_delete_entry_from_idx(me_, ae->prev_log_idx + 1);
     }
     //当前索引等于上一个日志索引
     r->current_idx = ae->prev_log_idx;
@@ -389,14 +452,14 @@ int raft_recv_appendentries(
     int i;
     for (i = 0; i < ae->n_entries; i++)
     {
-        msg_entry_t* ety = &ae->entries[i];
+        raft_entry_t* ety = &ae->entries[i];
         int ety_index = ae->prev_log_idx + 1 + i;
         raft_entry_t* existing_ety = raft_get_entry_from_idx(me_, ety_index);
         r->current_idx = ety_index;
         if (existing_ety && existing_ety->term != ety->term)
         {
             assert(me->commit_idx < ety_index);
-            log_delete(me->log, ety_index);
+            raft_delete_entry_from_idx(me_, ety_index);
             break;
         }
         else if (!existing_ety)
@@ -410,7 +473,12 @@ int raft_recv_appendentries(
         int e = raft_append_entry(me_, &ae->entries[i]);
         if (-1 == e)
             goto fail_with_current_idx;
-
+        else if (RAFT_ERR_SHUTDOWN == e)
+        {
+            r->success = 0;
+            r->first_idx = 0;
+            return RAFT_ERR_SHUTDOWN;
+        }
         r->current_idx = ae->prev_log_idx + 1 + i;
     }
 
@@ -440,22 +508,36 @@ fail:
     return -1;
 }
 
+int raft_already_voted(raft_server_t* me_)
+{
+    return ((raft_server_private_t*)me_)->voted_for != -1;
+}
 /**
  * 是否同意投票
  */
 static int __should_grant_vote(raft_server_private_t* me, msg_requestvote_t* vr)
 {
-    if (vr->term < raft_get_current_term((void*)me))//请求投票任期小于当前任期，不同意
+    /* TODO: 4.2.3 Raft Dissertation:
+     * if a server receives a RequestVote request within the minimum election
+     * timeout of hearing from a current leader, it does not update its term or
+     * grant its vote */
+
+    if (!raft_node_is_voting(raft_get_my_node((void*)me)))
+        return 0;
+
+    if (vr->term < raft_get_current_term((void*)me))
         return 0;
 
     /* TODO: if voted for is candiate return 1 (if below checks pass) */
-    /* we've already voted */
-    if (-1 != me->voted_for)//自己是候选者 不同意
+    if (raft_already_voted((void*)me))
         return 0;
 
-    int current_idx = raft_get_current_idx((void*)me);//当前日志索引值
+    /* Below we check if log is more up-to-date... */
 
-    if (0 == current_idx)//没有日志 同意
+    int current_idx = raft_get_current_idx((void*)me);
+
+    /* Our log is definitely not more up-to-date if it's empty! */
+    if (0 == current_idx)
         return 1;
 
     raft_entry_t* e = raft_get_entry_from_idx((void*)me, current_idx);
@@ -472,11 +554,14 @@ static int __should_grant_vote(raft_server_private_t* me, msg_requestvote_t* vr)
  * 收到投票请求(追随者)
  */
 int raft_recv_requestvote(raft_server_t* me_,
-                          int node,
+                          raft_node_t* node,
                           msg_requestvote_t* vr,
                           msg_requestvote_response_t *r)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    if (!node)
+        node = raft_get_node(me_, vr->candidate_id);
 
     if (raft_get_current_term(me_) < vr->term)
     {
@@ -490,20 +575,36 @@ int raft_recv_requestvote(raft_server_t* me_,
          * Both states would have voted for themselves */
         //节点当前状态不是领导 或者是候选者
         assert(!(raft_is_leader(me_) || raft_is_candidate(me_)));
-        //投票
-        raft_vote(me_, node);
-        r->vote_granted = 1;//投票
+
+        raft_vote_for_nodeid(me_, vr->candidate_id);
+        r->vote_granted = 1;
 
         /* there must be in an election. */
-        me->current_leader = -1;//当前无领导
+        me->current_leader = NULL;
 
         me->timeout_elapsed = 0;//投票超时时间清零
     }
     else
-        r->vote_granted = 0;//不同意选票
+    {
+        /* It's possible the candidate node has been removed from the cluster but
+         * hasn't received the appendentries that confirms the removal. Therefore
+         * the node is partitioned and still thinks its part of the cluster. It
+         * will eventually send a requestvote. This is error response tells the
+         * node that it might be removed. */
+        if (!node)
+        {
+            r->vote_granted = RAFT_REQUESTVOTE_ERR_UNKNOWN_NODE;
+            goto done;
+        }
+        else
+            r->vote_granted = 0;
+    }
 
-    __log(me_, "node requested vote: %d replying: %s",
-          node, r->vote_granted == 1 ? "granted" : "not granted");
+done:
+    __log(me_, node, "node requested vote: %d replying: %s",
+          node,
+          r->vote_granted == 1 ? "granted" :
+          r->vote_granted == 0 ? "not granted" : "unknown");
 
     r->term = raft_get_current_term(me_);//当前任期号
     return 0;
@@ -524,21 +625,20 @@ int raft_votes_is_majority(const int num_nodes, const int nvotes)
  * 请求投票消息响应(候选者)
  */
 int raft_recv_requestvote_response(raft_server_t* me_,
-                                   int node,
+                                   raft_node_t* node,
                                    msg_requestvote_response_t* r)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    __log(me_, "node responded to requestvote: %d status: %s",
-          node, r->vote_granted == 1 ? "granted" : "not granted");
+    __log(me_, node, "node responded to requestvote status: %s",
+          r->vote_granted == 1 ? "granted" :
+          r->vote_granted == 0 ? "not granted" : "unknown");
 
-    if (!raft_is_candidate(me_))//如果自己当前状态不是候选者
+    if (!raft_is_candidate(me_))
+    {
         return 0;
-
-    assert(node < me->num_nodes);//如果响应节点数大于当前节点数
-
-    //已经选出领导
-    if (raft_get_current_term(me_) < r->term)//如果当前任期号小于消息任期号
+    }
+    else if (raft_get_current_term(me_) < r->term)
     {
         raft_set_current_term(me_, r->term);//更新任期号
         raft_become_follower(me_);//成为追随者
@@ -551,13 +651,34 @@ int raft_recv_requestvote_response(raft_server_t* me_,
          * This happens if the network is pretty choppy. */
         return 0;
     }
+    __log(me_, node, "node responded to requestvote status:%s ct:%d rt:%d",
+          r->vote_granted == 1 ? "granted" :
+          r->vote_granted == 0 ? "not granted" : "unknown",
+          me->current_term,
+          r->term);
 
-    if (1 == r->vote_granted)//得票
+    switch (r->vote_granted)
     {
-        me->votes_for_me[node] = 1;
-        int votes = raft_get_nvotes_for_me(me_);
-        if (raft_votes_is_majority(me->num_nodes, votes))//得票过半
-            raft_become_leader(me_);//成为领导
+        case RAFT_REQUESTVOTE_ERR_GRANTED:
+            if (node)
+                raft_node_vote_for_me(node, 1);
+            int votes = raft_get_nvotes_for_me(me_);
+            if (raft_votes_is_majority(raft_get_num_voting_nodes(me_), votes))
+                raft_become_leader(me_);
+            break;
+
+        case RAFT_REQUESTVOTE_ERR_NOT_GRANTED:
+            break;
+
+        case RAFT_REQUESTVOTE_ERR_UNKNOWN_NODE:
+            if (raft_node_is_voting(raft_get_my_node(me_)) &&
+                me->connected == RAFT_NODE_STATUS_DISCONNECTING)
+                return RAFT_ERR_SHUTDOWN;
+            break;
+
+        default:
+            assert(0);
+
     }
 
     return 0;
@@ -566,58 +687,72 @@ int raft_recv_requestvote_response(raft_server_t* me_,
 /**
  * 客户端请求消息
  */
-int raft_recv_entry(raft_server_t* me_, int node, msg_entry_t* e,
+int raft_recv_entry(raft_server_t* me_,
+                    msg_entry_t* e,
                     msg_entry_response_t *r)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     int i;
 
-    if (!raft_is_leader(me_))//不是learder
-        return -1;
+    /* Only one voting cfg change at a time */
+    if (raft_entry_is_voting_cfg_change(e))
+        if (raft_voting_change_is_in_progress(me_))
+            return RAFT_ERR_ONE_VOTING_CHANGE_ONLY;
 
-    __log(me_, "received entry from: %d", node);
+    if (!raft_is_leader(me_))
+        return RAFT_ERR_NOT_LEADER;
 
-    raft_entry_t ety;//创建消息结构
-    ety.term = me->current_term; //消息任期
-    ety.id = e->id; //消息id
+    __log(me_, NULL, "received entry t:%d id: %d idx: %d",
+          me->current_term, e->id, raft_get_current_idx(me_) + 1);
+
+    raft_entry_t ety;
+    ety.term = me->current_term;
+    ety.id = e->id;
+    ety.type = e->type;
+
     memcpy(&ety.data, &e->data, sizeof(raft_entry_data_t));
     raft_append_entry(me_, &ety);//追加消息
     for (i = 0; i < me->num_nodes; i++)
+    {
+        if (me->node == me->nodes[i] || !me->nodes[i] ||
+            !raft_node_is_voting(me->nodes[i]))
+            continue;
+
         /* Only send new entries.
          * Don't send the entry to peers who are behind, to prevent them from
-         * becomming congested. */
-        if (me->nodeid != i)
-        {
-            //判断节点下一个要发送的id是不是等于当前消息id
-            int next_idx = raft_node_get_next_idx(raft_get_node(me_, i));
-            if (next_idx == raft_get_current_idx(me_))//可以发送消息
-                raft_send_appendentries(me_, i);
-        }
+         * becoming congested. */
+        int next_idx = raft_node_get_next_idx(me->nodes[i]);
+        if (next_idx == raft_get_current_idx(me_))
+            raft_send_appendentries(me_, me->nodes[i]);
+    }
 
     /* if we're the only node, we can consider the entry committed */
-    if (1 == me->num_nodes)//如果只有一个节点
-        me->commit_idx = raft_get_current_idx(me_);//已经应用的状态机的idx
+    if (1 == raft_get_num_voting_nodes(me_))
+        raft_set_commit_idx(me_, raft_get_current_idx(me_));
 
     r->id = e->id;
     r->idx = raft_get_current_idx(me_);
     r->term = me->current_term;
+
+    if (raft_entry_is_voting_cfg_change(e))
+        me->voting_cfg_change_log_idx = raft_get_current_idx(me_);
+
     return 0;
 }
 
 /**
  * 请求投票
  */
-int raft_send_requestvote(raft_server_t* me_, int node)
+int raft_send_requestvote(raft_server_t* me_, raft_node_t* node)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
     msg_requestvote_t rv;//请求投票消息
 
-    __log(me_, "sending requestvote to: %d", node);//记录发起了投票
 
-    rv.term = me->current_term;//任期为raft server对象的当前任期
-    rv.last_log_idx = raft_get_current_idx(me_);//当前日志的idx
-    rv.last_log_term = raft_get_last_log_term(me_);//最后一个日志的任期号
-    rv.candidate_id = raft_get_nodeid(me_);//候选者nodeid
+    assert(node);
+    assert(node != me->node);
+
+    __log(me_, node, "sending requestvote to: %d", node);//记录发起了投票
 
     if (me->cb.send_requestvote)//如果存在请求投票回调函数，这执行请求投票回调函数
         me->cb.send_requestvote(me_, me->udata, node, &rv);
@@ -630,6 +765,10 @@ int raft_send_requestvote(raft_server_t* me_, int node)
 int raft_append_entry(raft_server_t* me_, raft_entry_t* ety)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    if (raft_entry_is_voting_cfg_change(ety))
+        me->voting_cfg_change_log_idx = raft_get_current_idx(me_);
+
     return log_append_entry(me->log, ety);
 }
 
@@ -644,29 +783,58 @@ int raft_apply_entry(raft_server_t* me_)
     //最后应用到状态机的id 不能等于最后提交id
     if (me->last_applied_idx == me->commit_idx)
         return -1;
-    //获取最后applyid+1的日志
-    raft_entry_t* e = raft_get_entry_from_idx(me_, me->last_applied_idx + 1);
-    if (!e)
+
+    int log_idx = me->last_applied_idx + 1;
+
+    raft_entry_t* ety = raft_get_entry_from_idx(me_, log_idx);
+    if (!ety)
         return -1;
 
-    __log(me_, "applying log: %d, size: %d", me->last_applied_idx, e->data.len);
+    __log(me_, NULL, "applying log: %d, id: %d size: %d",
+          me->last_applied_idx, ety->id, ety->data.len);
 
     me->last_applied_idx++;
-    if (me->cb.applylog)//如果存在apply回调函数，则回调
-        me->cb.applylog(me_, me->udata, e->data.buf, e->data.len);
+
+    if (me->cb.applylog)
+    {
+        int e = me->cb.applylog(me_, me->udata, ety, me->last_applied_idx - 1);
+        if (RAFT_ERR_SHUTDOWN == e)
+            return RAFT_ERR_SHUTDOWN;
+    }
+
+    /* Membership Change: confirm connection with cluster */
+    if (RAFT_LOGTYPE_ADD_NODE == ety->type)
+    {
+        int node_id = me->cb.log_get_node_id(me_, raft_get_udata(me_), ety, log_idx);
+        raft_node_set_has_sufficient_logs(raft_get_node(me_, node_id));
+        if (node_id == raft_get_nodeid(me_))
+            me->connected = RAFT_NODE_STATUS_CONNECTED;
+    }
+
+    /* voting cfg change is now complete */
+    if (log_idx == me->voting_cfg_change_log_idx)
+        me->voting_cfg_change_log_idx = -1;
+
     return 0;
 }
-//添加日志条目到指定节点
-void raft_send_appendentries(raft_server_t* me_, int node_idx)
+
+raft_entry_t* raft_get_entries_from_idx(raft_server_t* me_, int idx, int* n_etys)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+    return log_get_from_idx(me->log, idx, n_etys);
+}
+
+int raft_send_appendentries(raft_server_t* me_, raft_node_t* node)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
 
-    if (!(me->cb.send_appendentries))//如果没有指定的回调函数，就失败
-        return;
+    assert(node);
+    assert(node != me->node);
 
-    raft_node_t* node = raft_get_node(me_, node_idx);//获取指定节点
+    if (!(me->cb.send_appendentries))
+        return -1;
 
-    msg_appendentries_t ae;//发送日志消息结构体
+    msg_appendentries_t ae = {};
     ae.term = me->current_term; //任期号为当前任期号
     ae.leader_commit = raft_get_commit_idx(me_);//领导人已经提交的日志的索引值
     ae.prev_log_idx = 0;//新的日志条目紧随之前的索引值 0表示这是这个节点成为领导人后的第一个消息
@@ -676,20 +844,7 @@ void raft_send_appendentries(raft_server_t* me_, int node_idx)
     //获取此节点下次需要发送的日志条目索引值
     int next_idx = raft_node_get_next_idx(node);
 
-    msg_entry_t mety;
-
-    raft_entry_t* ety = raft_get_entry_from_idx(me_, next_idx);//获取需要发送的日志
-    if (ety)
-    {
-        mety.term = ety->term;//任期号
-        mety.id = ety->id;//id
-        mety.data.len = ety->data.len;//数据长度
-        mety.data.buf = ety->data.buf;//数据
-        ae.entries = &mety;//消息地址给消息结构体
-        // TODO: we want to send more than 1 at a time
-        //目前只支持单条发送，后期实现多条发送
-        ae.n_entries = 1;
-    }
+    ae.entries = raft_get_entries_from_idx(me_, next_idx, &ae.n_entries);
 
     /* previous log is the log just before the new logs */
     if (1 < next_idx)
@@ -700,14 +855,17 @@ void raft_send_appendentries(raft_server_t* me_, int node_idx)
             ae.prev_log_term = prev_ety->term;//上条消息的任期号
     }
 
-    __log(me_, "sending appendentries node: %d, %d %d %d %d",
-          node_idx,
+    __log(me_, node, "sending appendentries node: ci:%d comi:%d t:%d lc:%d pli:%d plt:%d",
+          raft_get_current_idx(me_),
+          raft_get_commit_idx(me_),
           ae.term,
           ae.leader_commit,
           ae.prev_log_idx,
           ae.prev_log_term);//记录发送日志
 
-    me->cb.send_appendentries(me_, me->udata, node_idx, &ae);
+    me->cb.send_appendentries(me_, me->udata, node, &ae);
+
+    return 0;
 }
 
 /**
@@ -720,53 +878,78 @@ void raft_send_appendentries_all(raft_server_t* me_)
 
     me->timeout_elapsed = 0;
     for (i = 0; i < me->num_nodes; i++)
-        if (me->nodeid != i)
-            raft_send_appendentries(me_, i);//对指定节点发送一条消息
+        if (me->node != me->nodes[i])
+            raft_send_appendentries(me_, me->nodes[i]);
 }
-//初始化节点配置
-void raft_set_configuration(raft_server_t* me_,
-                            raft_node_configuration_t* nodes, int my_idx)
+
+raft_node_t* raft_add_node(raft_server_t* me_, void* udata, int id, int is_self)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
-    int num_nodes;
 
-    /* TODO: one memory allocation only please */
-    for (num_nodes = 0; nodes->udata_address; nodes++)
+    /* set to voting if node already exists */
+    raft_node_t* node = raft_get_node(me_, id);
+    if (node)
     {
-        num_nodes++;
-        me->nodes =
-            (raft_node_t*)realloc(me->nodes, sizeof(raft_node_t*) * num_nodes);
-        me->num_nodes = num_nodes;
-        me->nodes[num_nodes - 1] = raft_node_new(nodes->udata_address);
+        if (!raft_node_is_voting(node))
+        {
+            raft_node_set_voting(node, 1);
+            return node;
+        }
+        else
+            /* we shouldn't add a node twice */
+            return NULL;
     }
-    me->votes_for_me = (int*)calloc(num_nodes, sizeof(int));
-    me->nodeid = my_idx;
-}
-
-/**
- * 添加节点
- */
-int raft_add_node(raft_server_t* me_, void* udata, int is_self)
-{
-    raft_server_private_t* me = (raft_server_private_t*)me_;
-
-    /* TODO: does not yet support dynamic membership changes */
-    //目前不支持动态成员变化
-    if (me->current_term != 0 && me->timeout_elapsed != 0 &&
-        me->election_timeout != 0)
-        return -1;
 
     me->num_nodes++;
-    //重新分配节点内存
-    me->nodes =
-        (raft_node_t*)realloc(me->nodes, sizeof(raft_node_t*) * me->num_nodes);
-    me->nodes[me->num_nodes - 1] = raft_node_new(udata);//节点对象
-    me->votes_for_me =
-        (int*)realloc(me->votes_for_me, me->num_nodes * sizeof(int));//得票详情内存分配
-    me->votes_for_me[me->num_nodes - 1] = 0;//默认无投票
+    me->nodes = (raft_node_t*)realloc(me->nodes, sizeof(raft_node_t*) * me->num_nodes);
+    me->nodes[me->num_nodes - 1] = raft_node_new(udata, id);
+    assert(me->nodes[me->num_nodes - 1]);
     if (is_self)
-        me->nodeid = me->num_nodes - 1;//nodeid等于node数量
-    return 0;
+        me->node = me->nodes[me->num_nodes - 1];
+
+    return me->nodes[me->num_nodes - 1];
+}
+raft_node_t* raft_add_non_voting_node(raft_server_t* me_, void* udata, int id, int is_self)
+{
+    if (raft_get_node(me_, id))
+        return NULL;
+
+    raft_node_t* node = raft_add_node(me_, udata, id, is_self);
+    if (!node)
+        return NULL;
+
+    raft_node_set_voting(node, 0);
+    return node;
+}
+
+void raft_remove_node(raft_server_t* me_, raft_node_t* node)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    raft_node_t* new_array, *new_nodes;
+    new_array = (raft_node_t*)calloc((me->num_nodes - 1), sizeof(raft_node_t*));
+    new_nodes = new_array;
+
+    int i, found = 0;
+    for (i = 0; i<me->num_nodes; i++)
+    {
+        if (me->nodes[i] == node)
+        {
+            found = 1;
+            continue;
+        }
+        *new_nodes = me->nodes[i];
+        new_nodes++;
+    }
+
+    assert(found);
+
+    me->num_nodes--;
+    free(me->nodes);
+    me->nodes = new_array;
+
+    free(node);
+
 }
 
 /**
@@ -778,24 +961,29 @@ int raft_get_nvotes_for_me(raft_server_t* me_)
     int i, votes;
 
     for (i = 0, votes = 0; i < me->num_nodes; i++)
-        if (me->nodeid != i)
-            if (1 == me->votes_for_me[i])
+        if (me->node != me->nodes[i] && raft_node_is_voting(me->nodes[i]))
+            if (raft_node_has_vote_for_me(me->nodes[i]))
                 votes += 1;
 
-    if (me->voted_for == me->nodeid)
+    if (me->voted_for == raft_get_nodeid(me_))
         votes += 1;
 
     return votes;
 }
-/**
- * 投票
- */
-void raft_vote(raft_server_t* me_, const int node)
+
+void raft_vote(raft_server_t* me_, raft_node_t* node)
+{
+    raft_vote_for_nodeid(me_, node ? raft_node_get_id(node) : -1);
+}
+
+void raft_vote_for_nodeid(raft_server_t* me_, const int nodeid)
+
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
-    me->voted_for = node;
+
+    me->voted_for = nodeid;
     if (me->cb.persist_vote)
-        me->cb.persist_vote(me_, me->udata, node);
+        me->cb.persist_vote(me_, me->udata, nodeid);
 }
 
 int raft_msg_entry_response_committed(raft_server_t* me_,
@@ -809,4 +997,121 @@ int raft_msg_entry_response_committed(raft_server_t* me_,
     if (r->term != ety->term)
         return -1;
     return r->idx <= raft_get_commit_idx(me_);
+}
+
+int raft_apply_all(raft_server_t* me_)
+{
+    while (raft_get_last_applied_idx(me_) < raft_get_commit_idx(me_))
+    {
+        int e = raft_apply_entry(me_);
+        if (RAFT_ERR_SHUTDOWN == e)
+            return RAFT_ERR_SHUTDOWN;
+    }
+
+    return 0;
+}
+
+int raft_entry_is_voting_cfg_change(raft_entry_t* ety)
+{
+    return RAFT_LOGTYPE_ADD_NODE == ety->type ||
+           RAFT_LOGTYPE_DEMOTE_NODE == ety->type;
+}
+
+int raft_entry_is_cfg_change(raft_entry_t* ety)
+{
+    return (
+        RAFT_LOGTYPE_ADD_NODE == ety->type ||
+        RAFT_LOGTYPE_ADD_NONVOTING_NODE == ety->type ||
+        RAFT_LOGTYPE_DEMOTE_NODE == ety->type ||
+        RAFT_LOGTYPE_REMOVE_NODE == ety->type);
+}
+
+void raft_offer_log(raft_server_t* me_, raft_entry_t* ety, const int idx)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    if (!raft_entry_is_cfg_change(ety))
+        return;
+
+    int node_id = me->cb.log_get_node_id(me_, raft_get_udata(me_), ety, idx);
+    raft_node_t* node = raft_get_node(me_, node_id);
+    int is_self = node_id == raft_get_nodeid(me_);
+
+    switch (ety->type)
+    {
+        case RAFT_LOGTYPE_ADD_NONVOTING_NODE:
+            if (!is_self)
+            {
+                raft_node_t* node = raft_add_non_voting_node(me_, NULL, node_id, is_self);
+                assert(node);
+            }
+            break;
+
+        case RAFT_LOGTYPE_ADD_NODE:
+            node = raft_add_node(me_, NULL, node_id, is_self);
+            assert(node);
+            assert(raft_node_is_voting(node));
+            break;
+
+        case RAFT_LOGTYPE_DEMOTE_NODE:
+            raft_node_set_voting(node, 0);
+            break;
+
+        case RAFT_LOGTYPE_REMOVE_NODE:
+            if (node)
+                raft_remove_node(me_, node);
+            break;
+
+        default:
+            assert(0);
+    }
+}
+
+void raft_pop_log(raft_server_t* me_, raft_entry_t* ety, const int idx)
+{
+    raft_server_private_t* me = (raft_server_private_t*)me_;
+
+    if (!raft_entry_is_cfg_change(ety))
+        return;
+
+    int node_id = me->cb.log_get_node_id(me_, raft_get_udata(me_), ety, idx);
+
+    switch (ety->type)
+    {
+        case RAFT_LOGTYPE_DEMOTE_NODE:
+            {
+            raft_node_t* node = raft_get_node(me_, node_id);
+            raft_node_set_voting(node, 1);
+            }
+            break;
+
+        case RAFT_LOGTYPE_REMOVE_NODE:
+            {
+            int is_self = node_id == raft_get_nodeid(me_);
+            raft_node_t* node = raft_add_non_voting_node(me_, NULL, node_id, is_self);
+            assert(node);
+            }
+            break;
+
+        case RAFT_LOGTYPE_ADD_NONVOTING_NODE:
+            {
+            int is_self = node_id == raft_get_nodeid(me_);
+            raft_node_t* node = raft_get_node(me_, node_id);
+            raft_remove_node(me_, node);
+            if (is_self)
+                assert(0);
+            }
+            break;
+
+        case RAFT_LOGTYPE_ADD_NODE:
+            {
+            raft_node_t* node = raft_get_node(me_, node_id);
+            raft_node_set_voting(node, 0);
+            }
+            break;
+
+        default:
+            assert(0);
+            break;
+    }
 }
