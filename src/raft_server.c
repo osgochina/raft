@@ -91,7 +91,7 @@ void raft_free(raft_server_t* me_)
 }
 
 /**
- *
+ * 清理raft server
  */
 void raft_clear(raft_server_t* me_)
 {
@@ -111,6 +111,9 @@ void raft_clear(raft_server_t* me_)
     log_clear(me->log);
 }
 
+/**
+ * 删除指定索引的日志
+ */
 void raft_delete_entry_from_idx(raft_server_t* me_, int idx)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -121,6 +124,9 @@ void raft_delete_entry_from_idx(raft_server_t* me_, int idx)
     log_delete(me->log, idx);
 }
 
+/**
+ * 开始选举
+ */
 void raft_election_start(raft_server_t* me_)
 {
     raft_server_private_t* me = (raft_server_private_t*)me_;
@@ -508,6 +514,9 @@ fail:
     return -1;
 }
 
+/**
+ * 有选票吗
+ */
 int raft_already_voted(raft_server_t* me_)
 {
     return ((raft_server_private_t*)me_)->voted_for != -1;
