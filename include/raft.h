@@ -18,20 +18,27 @@
 #define RAFT_REQUESTVOTE_ERR_NOT_GRANTED      0  //不同意
 #define RAFT_REQUESTVOTE_ERR_UNKNOWN_NODE    -1  //不知道的节点
 
+
+/**
+ * 服务状态枚举
+ */
 typedef enum {
-    RAFT_STATE_NONE,
+    RAFT_STATE_NONE,//没有
     RAFT_STATE_FOLLOWER, //跟随者
     RAFT_STATE_CANDIDATE, //候选人
     RAFT_STATE_LEADER  //领导
 } raft_state_e;
 
 
+/**
+ * 日志类型枚举
+ */
 typedef enum {
-    RAFT_LOGTYPE_NORMAL,
-    RAFT_LOGTYPE_ADD_NONVOTING_NODE,
-    RAFT_LOGTYPE_ADD_NODE,
-    RAFT_LOGTYPE_DEMOTE_NODE,
-    RAFT_LOGTYPE_REMOVE_NODE,
+    RAFT_LOGTYPE_NORMAL,                //正常的日志类型
+    RAFT_LOGTYPE_ADD_NONVOTING_NODE,    //新增无投票权限节点
+    RAFT_LOGTYPE_ADD_NODE,              //新增节点
+    RAFT_LOGTYPE_DEMOTE_NODE,           //降级日志
+    RAFT_LOGTYPE_REMOVE_NODE,           //移除节点
     RAFT_LOGTYPE_NUM,
 } raft_logtype_e;
 
@@ -54,9 +61,9 @@ typedef struct
     unsigned int id;//日志唯一id
 
     /** type of entry */
-    int type;
+    int type;//日志类型
 
-    raft_entry_data_t data;
+    raft_entry_data_t data;//日志内容
 } raft_entry_t;
 
 /** Message sent from client to server.
@@ -207,7 +214,9 @@ typedef int (
     msg_appendentries_t* msg
     );
 
-/** Callback for detecting when non-voting nodes have obtained enough logs.
+/**
+ * 该节点已经有了足够的日志，可以变为有投票权限的节点了，回调这个函数
+ * Callback for detecting when non-voting nodes have obtained enough logs.
  * This triggers only when there are no pending configuration changes.
  * @param[in] raft The Raft server making this callback
  * @param[in] user_data User data that is passed from Raft server
@@ -254,7 +263,7 @@ typedef int (
     );
 
 /** Callback for saving log entry changes.
- *
+ * 保存日志消息的方法定义
  * This callback is used for:
  * <ul>
  *      <li>Adding entries to the log (ie. offer)</li>
@@ -282,52 +291,62 @@ typedef int (
     int entry_idx
     );
 
-//raft server 回调函数
+//raft server 回调函数定义
 typedef struct
 {
     /** Callback for sending request vote messages */
+    //发送投票消息请求
     func_send_requestvote_f send_requestvote;
 
     /** Callback for sending appendentries messages */
+    //发送附加日志条目rpc请求
     func_send_appendentries_f send_appendentries;
 
     /** Callback for finite state machine application
      * Return 0 on success.
      * Return RAFT_ERR_SHUTDOWN if you want the server to shutdown. */
+    //应用日志条目到状态机
     func_logentry_event_f applylog;
 
     /** Callback for persisting vote data
      * For safety reasons this callback MUST flush the change to disk. */
+    //保存投票结果到存储
     func_persist_int_f persist_vote;
 
     /** Callback for persisting term data
      * For safety reasons this callback MUST flush the change to disk. */
+    //保存任期号到存储
     func_persist_int_f persist_term;
 
     /** Callback for adding an entry to the log
      * For safety reasons this callback MUST flush the change to disk.
      * Return 0 on success.
      * Return RAFT_ERR_SHUTDOWN if you want the server to shutdown. */
+    //应用日志条目到状态机，保存到存储
     func_logentry_event_f log_offer;
 
     /** Callback for removing the oldest entry from the log
      * For safety reasons this callback MUST flush the change to disk.
      * @note If memory was malloc'd in log_offer then this should be the right
      *  time to free the memory. */
+    //移除当前日志条目的上一个日志条目，并且返回被移除的日志条目
     func_logentry_event_f log_poll;
 
     /** Callback for removing the youngest entry from the log
      * For safety reasons this callback MUST flush the change to disk.
      * @note If memory was malloc'd in log_offer then this should be the right
      *  time to free the memory. */
+    //删除制定的日志条目
     func_logentry_event_f log_pop;
 
     /** Callback for determining which node this configuration log entry
      * affects. This call only applies to configuration change log entries.
      * @return the node ID of the node */
+    //确定配置修改日志条目中的节点id
     func_logentry_event_f log_get_node_id;
 
     /** Callback for detecting when a non-voting node has sufficient logs. */
+    //无投票权限节点同步了足够多的日志
     func_node_has_sufficient_logs_f node_has_sufficient_logs;
 
     /** Callback for catching debugging log messages
@@ -335,6 +354,7 @@ typedef struct
     func_log_f log;
 } raft_cbs_t;
 
+//节点配置结构
 typedef struct
 {
     /** User data pointer for addressing.
@@ -366,16 +386,17 @@ raft_server_t* raft_new();
 void raft_free(raft_server_t* me);
 
 /** De-initialise Raft server. */
+//清除一个服务节点为初始化状态
 void raft_clear(raft_server_t* me);
 
 /** Set callbacks and user data.
- *
+ * 设置定义的会掉函数
  * @param[in] funcs Callbacks
  * @param[in] user_data "User data" - user's context that's included in a callback */
 void raft_set_callbacks(raft_server_t* me, raft_cbs_t* funcs, void* user_data);
 
 /** Add node.
- *
+ * 添加节点
  * @note This library does not yet support membership changes.
  *  Once raft_periodic has been run this will fail.
  *
@@ -397,10 +418,12 @@ void raft_set_callbacks(raft_server_t* me, raft_cbs_t* funcs, void* user_data);
  *  node if it was successfully added;
  *  NULL if the node already exists */
 raft_node_t* raft_add_node(raft_server_t* me, void* user_data, int id, int is_self);
-
+//别名
 #define raft_add_peer raft_add_node
 
-/** Add a node which does not participate in voting.
+/**
+ * 添加无投票权限节点
+ * Add a node which does not participate in voting.
  * If a node already exists the call will fail.
  * Parameters are identical to raft_add_node
  * @return
@@ -408,21 +431,29 @@ raft_node_t* raft_add_node(raft_server_t* me, void* user_data, int id, int is_se
  *  NULL if the node already exists */
 raft_node_t* raft_add_non_voting_node(raft_server_t* me_, void* udata, int id, int is_self);
 
-/** Remove node.
+/**
+ * 删除节点
+ * Remove node.
  * @param node The node to be removed. */
 void raft_remove_node(raft_server_t* me_, raft_node_t* node);
 
-/** Set election timeout.
+/**
+ * 设置心跳频率
+ * Set election timeout.
  * The amount of time that needs to elapse before we assume the leader is down
  * @param[in] msec Election timeout in milliseconds */
 void raft_set_election_timeout(raft_server_t* me, int msec);
 
-/** Set request timeout in milliseconds.
+/**
+ * 设置日志rpc超时时间
+ * Set request timeout in milliseconds.
  * The amount of time before we resend an appendentries message
  * @param[in] msec Request timeout in milliseconds */
 void raft_set_request_timeout(raft_server_t* me, int msec);
 
-/** Process events that are dependent on time passing.
+/**
+ * 心跳周期
+ * Process events that are dependent on time passing.
  * @param[in] msec_elapsed Time in milliseconds since the last call
  * @return
  *  0 on success;
@@ -430,7 +461,9 @@ void raft_set_request_timeout(raft_server_t* me, int msec);
  *  RAFT_ERR_SHUTDOWN when server should be shutdown */
 int raft_periodic(raft_server_t* me, int msec_elapsed);
 
-/** Receive an appendentries message.
+/**
+ * 附加日志条目请求
+ * Receive an appendentries message.
  *
  * Will block (ie. by syncing to disk) if we need to append a message.
  *
@@ -452,7 +485,9 @@ int raft_recv_appendentries(raft_server_t* me,
                             msg_appendentries_t* ae,
                             msg_appendentries_response_t *r);
 
-/** Receive a response from an appendentries message we sent.
+/**
+ * 附加日志条目响应
+ * Receive a response from an appendentries message we sent.
  * @param[in] node The node who sent us this message
  * @param[in] r The appendentries response message
  * @return 0 on success */
@@ -460,7 +495,9 @@ int raft_recv_appendentries_response(raft_server_t* me,
                                      raft_node_t* node,
                                      msg_appendentries_response_t* r);
 
-/** Receive a requestvote message.
+/**
+ * 投票请求
+ * Receive a requestvote message.
  * @param[in] node The node who sent us this message
  * @param[in] vr The requestvote message
  * @param[out] r The resulting response
@@ -470,7 +507,9 @@ int raft_recv_requestvote(raft_server_t* me,
                           msg_requestvote_t* vr,
                           msg_requestvote_response_t *r);
 
-/** Receive a response from a requestvote message we sent.
+/**
+ * 投票响应
+ * Receive a response from a requestvote message we sent.
  * @param[in] node The node this response was sent by
  * @param[in] r The requestvote response message
  * @return
@@ -480,7 +519,9 @@ int raft_recv_requestvote_response(raft_server_t* me,
                                    raft_node_t* node,
                                    msg_requestvote_response_t* r);
 
-/** Receive an entry message from the client.
+/**
+ * 客户端输入消息
+ * Receive an entry message from the client.
  *
  * Append the entry to the log and send appendentries to followers.
  *
@@ -514,148 +555,189 @@ int raft_recv_entry(raft_server_t* me,
                     msg_entry_response_t *r);
 
 /**
+ * 获取当前server的nodeid
  * @return server's node ID; -1 if it doesn't know what it is */
 int raft_get_nodeid(raft_server_t* me);
 
 /**
+ * 获取当前server对应的node
  * @return the server's node */
 raft_node_t* raft_get_my_node(raft_server_t *me_);
 
 /**
+ * 获取当前选举超时时间
  * @return currently configured election timeout in milliseconds */
 int raft_get_election_timeout(raft_server_t* me);
 
 /**
+ * 获取当前server的节点数量
  * @return number of nodes that this server has */
 int raft_get_num_nodes(raft_server_t* me);
 
 /**
+ * 获取当前server有投票权限的节点数量
  * @return number of voting nodes that this server has */
 int raft_get_num_voting_nodes(raft_server_t* me_);
 
 /**
+ * 获取当前server的日志总数
  * @return number of items within log */
 int raft_get_log_count(raft_server_t* me);
 
 /**
+ * 获取当前server的任期号
  * @return current term */
 int raft_get_current_term(raft_server_t* me);
 
 /**
+ * 获取当前server的日志index
  * @return current log index */
 int raft_get_current_idx(raft_server_t* me);
 
 /**
+ * 获取当前server已提交的的日志条目当前索引
  * @return commit index */
 int raft_get_commit_idx(raft_server_t* me_);
 
 /**
+ * 判断server是不是追随者
  * @return 1 if follower; 0 otherwise */
 int raft_is_follower(raft_server_t* me);
 
 /**
+ * 判断server是不是领导者
  * @return 1 if leader; 0 otherwise */
 int raft_is_leader(raft_server_t* me);
 
 /**
+ * 判断server是不是候选者
  * @return 1 if candidate; 0 otherwise */
 int raft_is_candidate(raft_server_t* me);
 
 /**
+ * 获取当前超时时间
  * @return currently elapsed timeout in milliseconds */
 int raft_get_timeout_elapsed(raft_server_t* me);
 
 /**
+ * 获取日志请求超时时间
  * @return request timeout in milliseconds */
 int raft_get_request_timeout(raft_server_t* me);
 
 /**
+ * 获取最后被应用到状态机的日志条目索引值
  * @return index of last applied entry */
 int raft_get_last_applied_idx(raft_server_t* me);
 
 /**
+ * 节点是不是领导者
  * @return 1 if node is leader; 0 otherwise */
 int raft_node_is_leader(raft_node_t* node);
 
 /**
+ * 获取节点下一个应该发送的日志索引
  * @return the node's next index */
 int raft_node_get_next_idx(raft_node_t* node);
 
 /**
+ * 获取该节点已经复制给他的日志的最高索引值
  * @return this node's user data */
 int raft_node_get_match_idx(raft_node_t* me);
 
 /**
+ * 获取该节点的自定义数据
  * @return this node's user data */
 void* raft_node_get_udata(raft_node_t* me);
 
 /**
+ * 设置指定节点的自定义数据
  * Set this node's user data */
 void raft_node_set_udata(raft_node_t* me, void* user_data);
 
 /**
+ * 获取 指定idx的消息
  * @param[in] idx The entry's index
  * @return entry from index */
 raft_entry_t* raft_get_entry_from_idx(raft_server_t* me, int idx);
 
 /**
+ * 获取指定nodeid的node
  * @param[in] node The node's ID
  * @return node pointed to by node ID */
 raft_node_t* raft_get_node(raft_server_t* me_, const int id);
 
 /**
+ * 获取直接索引的node
  * Used for iterating through nodes
  * @param[in] node The node's idx
  * @return node pointed to by node idx */
 raft_node_t* raft_get_node_from_idx(raft_server_t* me_, const int idx);
 
 /**
+ * 获取已经收到的选举票数
  * @return number of votes this server has received this election */
 int raft_get_nvotes_for_me(raft_server_t* me);
 
 /**
+ * 获取我已投票的节点id
  * @return node ID of who I voted for */
 int raft_get_voted_for(raft_server_t* me);
 
-/** Get what this node thinks the node ID of the leader is.
+/**
+ * 获取当前的领导者节点id
+ * Get what this node thinks the node ID of the leader is.
  * @return node of what this node thinks is the valid leader;
  *   -1 if the leader is unknown */
 int raft_get_current_leader(raft_server_t* me);
 
-/** Get what this node thinks the node of the leader is.
+/**
+ * 获取当前领导者的节点对象
+ * Get what this node thinks the node of the leader is.
  * @return node of what this node thinks is the valid leader;
  *   NULL if the leader is unknown */
 raft_node_t* raft_get_current_leader_node(raft_server_t* me);
 
 /**
+ * 获取当前的用户数据
  * @return callback user data */
 void* raft_get_udata(raft_server_t* me);
 
 /**
+ * 获得当前server服务的节点id
  * @return this server's node ID */
 int raft_get_my_id(raft_server_t* me);
 
-/** Vote for a server.
+/**
+ * 投票
+ * Vote for a server.
  * This should be used to reload persistent state, ie. the voted-for field.
  * @param[in] node The server to vote for */
 void raft_vote(raft_server_t* me_, raft_node_t* node);
 
-/** Vote for a server.
+/**
+ * 投票到指定节点id
+ * Vote for a server.
  * This should be used to reload persistent state, ie. the voted-for field.
  * @param[in] nodeid The server to vote for by nodeid */
 void raft_vote_for_nodeid(raft_server_t* me_, const int nodeid);
 
-/** Set the current term.
+/**
+ * 设置当前任期号
+ * Set the current term.
  * This should be used to reload persistent state, ie. the current_term field.
  * @param[in] term The new current term */
 void raft_set_current_term(raft_server_t* me, const int term);
 
-/** Set the commit idx.
+/**
+ * 设置当期已提交日志条目的idx
+ * Set the commit idx.
  * This should be used to reload persistent state, ie. the commit_idx field.
  * @param[in] commit_idx The new commit index. */
 void raft_set_commit_idx(raft_server_t* me, int commit_idx);
 
-/** Add an entry to the server's log.
+/**
+ * 附加消息到状态机
+ * Add an entry to the server's log.
  * This should be used to reload persistent state, ie. the commit log.
  * @param[in] ety The entry to be appended
  * @return
@@ -663,57 +745,71 @@ void raft_set_commit_idx(raft_server_t* me, int commit_idx);
  *  RAFT_ERR_SHUTDOWN server should shutdown */
 int raft_append_entry(raft_server_t* me, raft_entry_t* ety);
 
-/** Confirm if a msg_entry_response has been committed.
+/**
+ * 消息已提交响应函数
+ * Confirm if a msg_entry_response has been committed.
  * @param[in] r The response we want to check */
 int raft_msg_entry_response_committed(raft_server_t* me_,
                                       const msg_entry_response_t* r);
 
-/** Get node's ID.
+/**
+ * 获取直接节点的节点id
+ * Get node's ID.
  * @return ID of node */
 int raft_node_get_id(raft_node_t* me_);
 
-/** Tell if we are a leader, candidate or follower.
+/**
+ * 获取当前服务的角色
+ * Tell if we are a leader, candidate or follower.
  * @return get state of type raft_state_e. */
 int raft_get_state(raft_server_t* me_);
 
-/** The the most recent log's term
+/**
+ * 获取最后一个日志的任期号
+ * The the most recent log's term
  * @return the last log term */
 int raft_get_last_log_term(raft_server_t* me_);
 
-/** Tell if we are a leader, candidate or follower.
- * @return get state of type raft_state_e. */
-int raft_get_state(raft_server_t* me_);
 
-/** The the most recent log's term
- * @return the last log term */
-int raft_get_last_log_term(raft_server_t* me_);
 
-/** Turn a node into a voting node.
+/**
+ * 设置节点是有投票权限的节点
+ * Turn a node into a voting node.
  * Voting nodes can take part in elections and in-regards to commiting entries,
  * are counted in majorities. */
 void raft_node_set_voting(raft_node_t* node, int voting);
 
-/** Tell if a node is a voting node or not.
+/**
+ * 判断节点是否有投票权限
+ * Tell if a node is a voting node or not.
  * @return 1 if this is a voting node. Otherwise 0. */
 int raft_node_is_voting(raft_node_t* me_);
 
-/** Apply all entries up to the commit index
+/**
+ * 提交当前所有的日志到日志条目
+ * Apply all entries up to the commit index
  * @return
  *  0 on success;
  *  RAFT_ERR_SHUTDOWN when server should be shutdown */
 int raft_apply_all(raft_server_t* me_);
 
-/** Become leader
+/**
+ * 成为领导者
+ * Become leader
  * WARNING: this is a dangerous function call. It could lead to your cluster
  * losing it's consensus guarantees. */
 void raft_become_leader(raft_server_t* me);
 
-/** Determine if entry is voting configuration change.
+/**
+ * 当前节点状态是处于无投票权限节点状态变更中？？？
+ * Determine if entry is voting configuration change.
  * @param[in] ety The entry to query.
  * @return 1 if this is a voting configuration change. */
 int raft_entry_is_voting_cfg_change(raft_entry_t* ety);
 
-/** Determine if entry is configuration change.
+/**
+ * 当前节点状态是否处理有投票权限节点状态变更中
+ * Determine if entry is configuration change.
  * @param[in] ety The entry to query.
  * @return 1 if this is a configuration change. */
 int raft_entry_is_cfg_change(raft_entry_t* ety);

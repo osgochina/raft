@@ -209,17 +209,23 @@ int raft_periodic(raft_server_t* me_, int msec_since_last_period)
     me->timeout_elapsed += msec_since_last_period;
 
     /* Only one voting node means it's safe for us to become the leader */
+    //有跳票节点数量为1，当前节点有投票权限，当前节点不是leader，成为leader
     if (1 == raft_get_num_voting_nodes(me_) &&
         raft_node_is_voting(raft_get_my_node((void*)me)) &&
         !raft_is_leader(me_))
         raft_become_leader(me_);
 
+    //
     if (me->state == RAFT_STATE_LEADER)
     {
         if (me->request_timeout <= me->timeout_elapsed)//如果已经到了心跳的时间
             raft_send_appendentries_all(me_);//对所有节点发送心跳包
     }
-    else if (me->election_timeout <= me->timeout_elapsed)//如果选举超时时间小于心跳时间
+        /**如果选举超时时间小于心跳时间,默认情况选举超时时间一定大于心跳超时时间
+         * 追随者没有收到一次没有收到心跳包 心跳超时时间累加 大于选举时间，开始成为候选人
+         * 选举，当前节点必须是有跳票权限的节点
+         **/
+    else if (me->election_timeout <= me->timeout_elapsed)
     {
         if (1 < raft_get_num_voting_nodes(me_) &&
             raft_node_is_voting(raft_get_my_node(me_)))

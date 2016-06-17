@@ -24,8 +24,8 @@ typedef struct
 {
     void* udata;
 
-    int next_idx;
-    int match_idx;
+    int next_idx;//对于每一个服务器，需要发送给他的下一个日志条目的索引值（初始化为领导人最后索引值加一）
+    int match_idx;//对于每一个服务器，已经复制给他的日志的最高索引值
 
     int flags;
 
