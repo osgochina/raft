@@ -2,10 +2,10 @@
 #define RAFT_PRIVATE_H_
 #include "raft.h"
 enum {
-    RAFT_NODE_STATUS_DISCONNECTED,
-    RAFT_NODE_STATUS_CONNECTED,
-    RAFT_NODE_STATUS_CONNECTING,
-    RAFT_NODE_STATUS_DISCONNECTING
+    RAFT_NODE_STATUS_DISCONNECTED,//节点已断开链接
+    RAFT_NODE_STATUS_CONNECTED,   //节点已链接
+    RAFT_NODE_STATUS_CONNECTING,  //节点连接中
+    RAFT_NODE_STATUS_DISCONNECTING//节点断开链接中
 };
 
 /**
@@ -79,6 +79,7 @@ typedef struct {
     raft_node_t* node;
 
     /* the log which has a voting cfg change, otherwise -1 */
+    //节点状态转换的时候记录日志索引
     int voting_cfg_change_log_idx;
 
     /* our membership with the cluster is confirmed (ie. configuration log was
@@ -105,48 +106,50 @@ void raft_set_current_term(raft_server_t* me,int term);
  * @return 0 on error */
 //发送投票请求
 int raft_send_requestvote(raft_server_t* me, raft_node_t* node);
-
+//发送附加日志rpc
 int raft_send_appendentries(raft_server_t* me, raft_node_t* node);
-
+//对所有节点发送附加日志rpc
 void raft_send_appendentries_all(raft_server_t* me_);
 
 /**
+ * 应用日志到状态机
  * Apply entry at lastApplied + 1. Entry becomes 'committed'.
  * @return 1 if entry committed, 0 otherwise */
 int raft_apply_entry(raft_server_t* me_);
 
 /**
+ * 添加日志到当前raft server的日志条目中
  * Appends entry using the current term.
  * Note: we make the assumption that current term is up-to-date
  * @return 0 if unsuccessful */
 int raft_append_entry(raft_server_t* me_, raft_entry_t* c);
-
+//设置最后应用到状态机的日志idx
 void raft_set_last_applied_idx(raft_server_t* me, int idx);
-
+//设置server的角色
 void raft_set_state(raft_server_t* me_, int state);
-
+//获取当前server角色
 int raft_get_state(raft_server_t* me_);
-
+//创建新节点对象
 raft_node_t* raft_node_new(void* udata, int id);
-
+//设置节点的下一个同步日志idx
 void raft_node_set_next_idx(raft_node_t* node, int nextIdx);
-
+//设置节点的复制给他的日志的最高索引值
 void raft_node_set_match_idx(raft_node_t* node, int matchIdx);
-
+//获取节点复制给他的日志的最高索引值
 int raft_node_get_match_idx(raft_node_t* me_);
-
+//投票给指定节点
 void raft_node_vote_for_me(raft_node_t* me_, const int vote);
-
+//判断节点是否投票
 int raft_node_has_vote_for_me(raft_node_t* me_);
-
+//无投票权限节点已经有了足够日志了
 void raft_node_set_has_sufficient_logs(raft_node_t* me_);
-
+//无投票权限节点是否有足够的日志
 int raft_node_has_sufficient_logs(raft_node_t* me_);
-
+//统计投票是否占大多数
 int raft_votes_is_majority(const int nnodes, const int nvotes);
-
+//弹出日志执行逻辑
 void raft_pop_log(raft_server_t* me_, raft_entry_t* ety, const int idx);
-
+//写入日志执行逻辑
 void raft_offer_log(raft_server_t* me_, raft_entry_t* ety, const int idx);
 
 #endif /* RAFT_PRIVATE_H_ */

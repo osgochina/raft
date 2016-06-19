@@ -99,7 +99,9 @@ void log_set_callbacks(log_t* me_, raft_cbs_t* funcs, void* raft)
     me->raft = raft;
     me->cb = funcs;
 }
-
+/**
+ * 清除log对象
+ */
 void log_clear(log_t* me_)
 {
     log_private_t* me = (log_private_t*)me_;
