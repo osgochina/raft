@@ -17,21 +17,24 @@
 #include "raft.h"
 
 #define RAFT_NODE_VOTED_FOR_ME 1
-#define RAFT_NODE_VOTING 1 << 1
-#define RAFT_NODE_HAS_SUFFICIENT_LOG 1 << 2
+#define RAFT_NODE_VOTING 1 << 1 //节点有选举权限
+#define RAFT_NODE_HAS_SUFFICIENT_LOG 1 << 2  //节点有足够的日志
 
 typedef struct
 {
-    void* udata;
+    void* udata;//用户数据对象
 
     int next_idx;//对于每一个服务器，需要发送给他的下一个日志条目的索引值（初始化为领导人最后索引值加一）
     int match_idx;//对于每一个服务器，已经复制给他的日志的最高索引值
 
-    int flags;
+    int flags;//节点标示
 
-    int id;
+    int id;//节点id
 } raft_node_private_t;
 
+/**
+ * 创建节点对象
+ */
 raft_node_t* raft_node_new(void* udata, int id)
 {
     raft_node_private_t* me;
@@ -99,6 +102,9 @@ void raft_node_set_udata(raft_node_t* me_, void* udata)
     me->udata = udata;
 }
 
+/**
+ * 投票给指定的节点
+ */
 void raft_node_vote_for_me(raft_node_t* me_, const int vote)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
@@ -108,12 +114,18 @@ void raft_node_vote_for_me(raft_node_t* me_, const int vote)
         me->flags &= ~RAFT_NODE_VOTED_FOR_ME;
 }
 
+/**
+ * 判断节点是否投票给了我
+ */
 int raft_node_has_vote_for_me(raft_node_t* me_)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
     return (me->flags & RAFT_NODE_VOTED_FOR_ME) != 0;
 }
 
+/**
+ * 设置节点有投票权限
+ */
 void raft_node_set_voting(raft_node_t* me_, int voting)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
@@ -123,24 +135,36 @@ void raft_node_set_voting(raft_node_t* me_, int voting)
         me->flags &= ~RAFT_NODE_VOTING;
 }
 
+/**
+ * 判断节点是否有投票权限
+ */
 int raft_node_is_voting(raft_node_t* me_)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
     return (me->flags & RAFT_NODE_VOTING) != 0;
 }
 
+/**
+ * 设置节点日志已经足够
+ */
 void raft_node_set_has_sufficient_logs(raft_node_t* me_)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
     me->flags |= RAFT_NODE_HAS_SUFFICIENT_LOG;
 }
 
+/**
+ * 判断节点日志是否足够
+ */
 int raft_node_has_sufficient_logs(raft_node_t* me_)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;
     return (me->flags & RAFT_NODE_HAS_SUFFICIENT_LOG) != 0;
 }
 
+/**
+ * 获取节点id
+ */
 int raft_node_get_id(raft_node_t* me_)
 {
     raft_node_private_t* me = (raft_node_private_t*)me_;

@@ -111,6 +111,9 @@ void log_clear(log_t* me_)
     me->base = 0;
 }
 
+/**
+ * 追加消息到日志
+ */
 int log_append_entry(log_t* me_, raft_entry_t* c)
 {
     log_private_t* me = (log_private_t*)me_;
@@ -134,6 +137,9 @@ int log_append_entry(log_t* me_, raft_entry_t* c)
     return e;
 }
 
+/**
+ *
+ */
 raft_entry_t* log_get_from_idx(log_t* me_, int idx, int *n_etys)
 {
     log_private_t* me = (log_private_t*)me_;
