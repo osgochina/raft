@@ -557,7 +557,8 @@ void TestRaft_server_recv_requestvote_response_dont_increase_votes_for_me_when_n
     memset(&rvr, 0, sizeof(msg_requestvote_response_t));
     rvr.term = 1;
     rvr.vote_granted = 0;
-    raft_recv_requestvote_response(r, raft_get_node(r, 2), &rvr);
+    int e = raft_recv_requestvote_response(r, raft_get_node(r, 2), &rvr);
+    CuAssertIntEquals(tc, 0, e);
     CuAssertTrue(tc, 0 == raft_get_nvotes_for_me(r));
 }
 
@@ -588,15 +589,19 @@ void TestRaft_server_recv_requestvote_response_increase_votes_for_me(
     raft_add_node(r, NULL, 2, 0);
     raft_set_current_term(r, 1);
     CuAssertTrue(tc, 0 == raft_get_nvotes_for_me(r));
+    CuAssertIntEquals(tc, 1, raft_get_current_term(r));
 
     raft_become_candidate(r);
+    CuAssertIntEquals(tc, 2, raft_get_current_term(r));
+    CuAssertTrue(tc, 1 == raft_get_nvotes_for_me(r));
 
     msg_requestvote_response_t rvr;
     memset(&rvr, 0, sizeof(msg_requestvote_response_t));
-    rvr.term = 1;
+    rvr.term = 2;
     rvr.vote_granted = 1;
-    raft_recv_requestvote_response(r, raft_get_node(r, 2), &rvr);
-    CuAssertTrue(tc, 1 == raft_get_nvotes_for_me(r));
+    int e = raft_recv_requestvote_response(r, raft_get_node(r, 2), &rvr);
+    CuAssertIntEquals(tc, 0, e);
+    CuAssertTrue(tc, 2 == raft_get_nvotes_for_me(r));
 }
 
 void TestRaft_server_recv_requestvote_response_must_be_candidate_to_receive(
@@ -635,9 +640,9 @@ void TestRaft_server_recv_requestvote_reply_false_if_term_less_than_current_term
     msg_requestvote_t rv;
     memset(&rv, 0, sizeof(msg_requestvote_t));
     rv.term = 1;
-    raft_recv_requestvote(r, raft_get_node(r, 2), &rv, &rvr);
-
-    CuAssertTrue(tc, 0 == rvr.vote_granted);
+    int e = raft_recv_requestvote(r, raft_get_node(r, 2), &rv, &rvr);
+    CuAssertIntEquals(tc, 0, e);
+    CuAssertIntEquals(tc, 0, rvr.vote_granted);
 }
 
 void TestRaft_leader_recv_requestvote_does_not_step_down(
@@ -977,7 +982,7 @@ void TestRaft_follower_recv_appendentries_reply_false_if_doesnt_have_log_at_prev
     CuAssertTrue(tc, 0 == aer.success);
 }
 
-static raft_entry_t* __entries_for_conflict_tests(
+static raft_entry_t* __create_mock_entries_for_conflict_tests(
         CuTest * tc,
         raft_server_t* r,
         char** strs)
@@ -994,7 +999,7 @@ static raft_entry_t* __entries_for_conflict_tests(
     raft_append_entry(r, &ety);
     CuAssertTrue(tc, 1 == raft_get_log_count(r));
 
-    /* this log will be overwritten by the appendentries below */
+    /* this log will be overwritten by a later appendentries */
     char *str2 = strs[1];
     ety.data.buf = str2;
     ety.data.len = 3;
@@ -1005,7 +1010,7 @@ static raft_entry_t* __entries_for_conflict_tests(
     CuAssertTrue(tc, NULL != (ety_appended = raft_get_entry_from_idx(r, 2)));
     CuAssertTrue(tc, !strncmp(ety_appended->data.buf, str2, 3));
 
-    /* this log will be overwritten by the appendentries below */
+    /* this log will be overwritten by a later appendentries */
     char *str3 = strs[2];
     ety.data.buf = str3;
     ety.data.len = 3;
@@ -1020,7 +1025,7 @@ static raft_entry_t* __entries_for_conflict_tests(
 }
 
 /* 5.3 */
-void TestRaft_follower_recv_appendentries_delete_entries_if_conflict_with_new_entries(
+void TestRaft_follower_recv_appendentries_delete_entries_if_conflict_with_new_entries_via_prev_log_idx(
     CuTest * tc)
 {
     msg_appendentries_t ae;
@@ -1033,13 +1038,14 @@ void TestRaft_follower_recv_appendentries_delete_entries_if_conflict_with_new_en
     raft_set_current_term(r, 1);
 
     char* strs[] = {"111", "222", "333"};
-    raft_entry_t *ety_appended = __entries_for_conflict_tests(tc, r, strs);
+    raft_entry_t *ety_appended = __create_mock_entries_for_conflict_tests(tc, r, strs);
 
     /* pass a appendentry that is newer  */
     msg_entry_t mety = {};
 
     memset(&ae, 0, sizeof(msg_appendentries_t));
     ae.term = 2;
+    /* entries from 2 onwards will be overwritten by this appendentries message */
     ae.prev_log_idx = 1;
     ae.prev_log_term = 1;
     /* include one entry */
@@ -1054,8 +1060,52 @@ void TestRaft_follower_recv_appendentries_delete_entries_if_conflict_with_new_en
     raft_recv_appendentries(r, raft_get_node(r, 2), &ae, &aer);
     CuAssertTrue(tc, 1 == aer.success);
     CuAssertTrue(tc, 2 == raft_get_log_count(r));
+    /* str1 is still there */
     CuAssertTrue(tc, NULL != (ety_appended = raft_get_entry_from_idx(r, 1)));
     CuAssertTrue(tc, !strncmp(ety_appended->data.buf, strs[0], 3));
+    /* str4 has overwritten the last 2 entries */
+    CuAssertTrue(tc, NULL != (ety_appended = raft_get_entry_from_idx(r, 2)));
+    CuAssertTrue(tc, !strncmp(ety_appended->data.buf, str4, 3));
+}
+
+void TestRaft_follower_recv_appendentries_delete_entries_if_conflict_with_new_entries_via_prev_log_idx_at_idx_0(
+    CuTest * tc)
+{
+    msg_appendentries_t ae;
+    msg_appendentries_response_t aer;
+
+    void *r = raft_new();
+    raft_add_node(r, NULL, 1, 1);
+    raft_add_node(r, NULL, 2, 0);
+
+    raft_set_current_term(r, 1);
+
+    char* strs[] = {"111", "222", "333"};
+    raft_entry_t *ety_appended = __create_mock_entries_for_conflict_tests(tc, r, strs);
+
+    /* pass a appendentry that is newer  */
+    msg_entry_t mety = {};
+
+    memset(&ae, 0, sizeof(msg_appendentries_t));
+    ae.term = 2;
+    /* ALL append entries will be overwritten by this appendentries message */
+    ae.prev_log_idx = 0;
+    ae.prev_log_term = 0;
+    /* include one entry */
+    memset(&mety, 0, sizeof(msg_entry_t));
+    char *str4 = "444";
+    mety.data.buf = str4;
+    mety.data.len = 3;
+    mety.id = 4;
+    ae.entries = &mety;
+    ae.n_entries = 1;
+
+    raft_recv_appendentries(r, raft_get_node(r, 2), &ae, &aer);
+    CuAssertTrue(tc, 1 == aer.success);
+    CuAssertTrue(tc, 1 == raft_get_log_count(r));
+    /* str1 is gone */
+    CuAssertTrue(tc, NULL != (ety_appended = raft_get_entry_from_idx(r, 1)));
+    CuAssertTrue(tc, !strncmp(ety_appended->data.buf, str4, 3));
 }
 
 void TestRaft_follower_recv_appendentries_delete_entries_if_current_idx_greater_than_prev_log_idx(
@@ -1071,7 +1121,9 @@ void TestRaft_follower_recv_appendentries_delete_entries_if_current_idx_greater_
     raft_set_current_term(r, 1);
 
     char* strs[] = {"111", "222", "333"};
-    raft_entry_t *ety_appended = __entries_for_conflict_tests(tc, r, strs);
+    raft_entry_t *ety_appended;
+    
+    __create_mock_entries_for_conflict_tests(tc, r, strs);
 
     memset(&ae, 0, sizeof(msg_appendentries_t));
     ae.term = 2;
@@ -1086,6 +1138,8 @@ void TestRaft_follower_recv_appendentries_delete_entries_if_current_idx_greater_
     CuAssertTrue(tc, NULL != (ety_appended = raft_get_entry_from_idx(r, 1)));
     CuAssertTrue(tc, !strncmp(ety_appended->data.buf, strs[0], 3));
 }
+
+// TODO: add TestRaft_follower_recv_appendentries_delete_entries_if_term_is_different
 
 void TestRaft_follower_recv_appendentries_add_new_entries_not_already_in_log(
     CuTest * tc)
